@@ -42,5 +42,10 @@ add_executable(zex_runner tests/z80/zex_runner.c)
 target_include_directories(zex_runner PRIVATE src)
 target_link_libraries(zex_runner adamcore)
 
+add_executable(boip_fake_fujinet tests/adamnet/boip_fake_fujinet.c)
+target_include_directories(boip_fake_fujinet PRIVATE src)
+target_link_libraries(boip_fake_fujinet adamcore pthread)
+
 add_test(NAME harte COMMAND harte_runner ${CMAKE_SOURCE_DIR}/tests/data/harte-z80)
 add_test(NAME zexdoc COMMAND zex_runner ${CMAKE_SOURCE_DIR}/tests/data/zexdoc.com)
+add_test(NAME boip COMMAND boip_fake_fujinet)

@@ -127,7 +127,13 @@ int main(int argc, char **argv)
             if (type_text && *type_text && f >= type_frame &&
                 (f - type_frame) % 8 == 0) {
                 uint8_t ch = (uint8_t)*type_text++;
-                adamcore_inject_key(c, ch == '\n' ? 0x0D : ch);
+                if (ch == '\n') ch = 0x0D;
+                else if (ch == '^') { /* ^1..^6 = SmartKeys I..VI */
+                    ch = (uint8_t)(0x80 + (*type_text++ - '0'));
+                } else if (ch == '\b') {
+                    ch = 0x08;
+                }
+                adamcore_inject_key(c, ch);
             }
             if (wf) {
                 /* 44100/59.922 = 736 samples per frame */

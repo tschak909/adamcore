@@ -41,8 +41,23 @@ Test material:
 Author's own prior work (GPLv3, same author, reused by right):
 
 - fujinet-pc / fujinet-firmware ADAM target (`lib/bus/adamnet`,
-  `lib/device/adamnet`) — the authoritative reference for the AdamNet
-  "Bus over IP" (BoIP) wire protocol this core's `boip.c` implements the master
-  side of
+  `lib/device/adamnet`, `lib/hardware/BoIPChannel.cpp`) — the authoritative
+  reference for the AdamNet "Bus over IP" (BoIP) wire protocol this core's
+  `boip.c` implements the master side of, and for the TCP channel's
+  connection/reconnection semantics
+- The author's "All About AdamNet" protocol reference — packet types,
+  timings, and byte-exact transaction traces
+- fujinet-config sources (`src/adam`) — the guest-side expectations of the
+  Fuji character-device DCB contract (e.g. status 0x8C = no data)
+
+Interoperability analysis of shipped firmware (not emulator source):
+
+- The Coleco EOS ROM's own AdamNet code paths were observed (via this
+  core's trace tooling) and, where necessary, disassembled to pin down the
+  Z80-visible master contract: PCB location and pointer variable, the
+  0x80|command completion convention, EOS ownership of the DCB table, the
+  DCB ADDRESS CODE field, and EOS's completion/retry status handling.
+  This is behavioral analysis of the software adamcore must run — no
+  emulator source was involved.
 
 This file is updated whenever a new reference is consulted.

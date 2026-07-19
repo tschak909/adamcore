@@ -396,6 +396,7 @@ static void advance(struct boip *b)
                 return;
             }
             break;
+        case B_BWR_DATA_ACK:
         case B_CWR_ACK:
             if (t == 0x9) { complete(b, ST_OK); return; }
             if (t == 0xC) { complete(b, ST_TIMEOUT); return; }
