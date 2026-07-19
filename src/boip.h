@@ -22,6 +22,10 @@ void boip_destroy(struct boip *b);
 
 void boip_poll(struct boip *b);      /* accept/reconnect housekeeping */
 int  boip_connected(struct boip *b);
+/* Returns 1 exactly once: when the first client connection of this
+ * core's lifetime has just been accepted. Lets ADAM sessions reboot so
+ * the EOS boot scan (which races the client's connect) sees FujiNet. */
+int  boip_take_first_connect(struct boip *b);
 void boip_bus_reset(struct boip *b); /* broadcast wire RESET to devices */
 
 /* Advance/start the transaction for the DCB at d (intrinsic-RAM address)

@@ -79,6 +79,9 @@ struct boip {
     uint64_t crd_chain_start;
 
     uint64_t t_keepalive;
+
+    int ever_connected;
+    int first_connect_pending;
 };
 
 static uint8_t xor_ck(const uint8_t *p, int n)
@@ -110,6 +113,15 @@ void boip_destroy(struct boip *b)
 }
 
 int boip_connected(struct boip *b) { return b && b->fd >= 0; }
+
+int boip_take_first_connect(struct boip *b)
+{
+    if (b && b->first_connect_pending) {
+        b->first_connect_pending = 0;
+        return 1;
+    }
+    return 0;
+}
 
 static void drop_connection_at(struct boip *b, const char *why)
 {
@@ -443,6 +455,10 @@ void boip_poll(struct boip *b)
         if (b->fd >= 0) drop_connection_at(b, "new-accept");
         b->fd = fd;
         b->rxlen = 0;
+        if (!b->ever_connected) {
+            b->ever_connected = 1;
+            b->first_connect_pending = 1;
+        }
     }
     if (b->fd >= 0 && b->state != B_IDLE) {
         advance(b);

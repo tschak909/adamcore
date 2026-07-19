@@ -143,8 +143,14 @@ void adamnet_scan(adamnet *an)
     if (!an->active) return;
     m = ram(an);
 
-    if (an->link)
+    if (an->link) {
         boip_poll(an->link);
+        /* EOS's boot-device scan usually finishes before FujiNet's
+         * client manages to connect; reboot once so the scan sees it. */
+        if (boip_take_first_connect(an->link) &&
+            an->mc->cfg.start_machine == ADAMCORE_MACHINE_ADAM)
+            adamcore_request_reset(an->mc, 0);
+    }
 
     /* PCB commands */
     cmd = m[an->pcb_addr];
