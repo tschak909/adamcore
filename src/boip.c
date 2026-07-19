@@ -25,7 +25,10 @@
 #include "machine.h"
 #include "net.h"
 
-#define CRD_GIVEUP_MS 500
+/* Generous: on Android the whole process can stall for hundreds of ms
+ * (scheduling, app start); the guest never perceives those stalls, so
+ * giving up too early makes devices "vanish" from its point of view. */
+#define CRD_GIVEUP_MS 3000
 
 enum {
     B_IDLE = 0,
@@ -50,9 +53,11 @@ enum {
                           with "nothing yet" (NAK or empty DATA) */
     TIMEOUT_MS = 5000,
     /* Devices answer STATUS within ~200us on the real bus; a short
-     * timeout keeps the EOS 15-address roll-call fast when most
-     * addresses have no FujiNet device behind them. */
-    STATUS_TIMEOUT_MS = 50
+     * per-attempt timeout keeps the EOS 15-address roll-call fast when
+     * most addresses have no FujiNet device behind them, while the
+     * retries ride out host-side scheduling stalls. */
+    STATUS_TIMEOUT_MS = 120,
+    STATUS_RETRIES = 5
 };
 
 struct boip {
@@ -427,7 +432,7 @@ static void advance(struct boip *b)
         if (now - b->t_start > STATUS_TIMEOUT_MS) {
             /* the real master retries a quiet node before giving up;
              * this also rides out FujiNet's startup registration */
-            if (b->status_retries++ < 2) {
+            if (b->status_retries++ < STATUS_RETRIES) {
                 b->t_start = now;
                 b->rxlen = 0;
                 tx1(b, 1);

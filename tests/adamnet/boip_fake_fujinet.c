@@ -294,7 +294,7 @@ int main(void)
 
     /* 6. char read with no data -> bounded retries -> 0x8C */
     post_dcb(15, 4, 0x4000, 1024, 0);
-    check("char read NAK completes 0x8C", wait_done(3000) == 0x8C);
+    check("char read NAK completes 0x8C", wait_done(6000) == 0x8C);
 
     /* 7. absent device -> timeout 0x9B */
     post_dcb(6, 1, 0, 0, 0);

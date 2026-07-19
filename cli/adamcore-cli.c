@@ -49,6 +49,7 @@ int main(int argc, char **argv)
     const char *type_text = NULL;
     int reset_at = -1, reset_mode = 0;
     int throttle = 0;
+    int jitter = 0;
     int pc_hist = 0;
     const char *dump_ram = NULL;
     static unsigned long hist[65536];
@@ -79,6 +80,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--type")) { type_frame = atoi(argv[++i]); type_text = argv[++i]; }
         else if (!strcmp(a, "--reset-at")) { reset_at = atoi(argv[++i]); reset_mode = atoi(argv[++i]); }
         else if (!strcmp(a, "--throttle")) throttle = 1;
+        else if (!strcmp(a, "--jitter")) jitter = 1;
         else if (!strcmp(a, "--pc-hist")) pc_hist = 1;
         else if (!strcmp(a, "--dump-ram")) dump_ram = argv[++i];
         else { fprintf(stderr, "unknown arg %s\n", a); return 2; }
@@ -105,8 +107,10 @@ int main(int argc, char **argv)
         clock_gettime(CLOCK_MONOTONIC, &next);
         for (f = 0; f < frames; f++) {
             if (throttle) {
-                next.tv_nsec += 16688000; /* 59.922 Hz */
-                while (next.tv_nsec >= 1000000000) {
+                /* jitter mode: emulate a phone's uneven frame pacing */
+                long extra = jitter ? (long)(rand() % 25) * 1000000L : 0;
+                next.tv_nsec += 16688000 + extra; /* 59.922 Hz */
+                while (next.tv_nsec >= 1000000000L) {
                     next.tv_nsec -= 1000000000;
                     next.tv_sec++;
                 }
