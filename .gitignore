@@ -1,0 +1,9 @@
+build/
+tests/data/
+*.o
+*.a
+*.so
+*.ppm
+*.wav
+compile_commands.json
+.cache/
