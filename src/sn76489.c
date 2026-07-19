@@ -37,6 +37,11 @@ void sn_reset(sn76489 *s, uint32_t clock, uint32_t rate)
         (uint32_t)(((uint64_t)(clock / 16) << 16) / (rate ? rate : 44100));
 }
 
+void sn_publish(sn76489 *s, uint64_t cpu_cycles)
+{
+    s->emu_pos = cpu_cycles * s->rate / s->clock;
+}
+
 void sn_write(sn76489 *s, uint64_t cpu_cycles, uint8_t val)
 {
     uint32_t w = s->qw;
@@ -121,7 +126,27 @@ static void tick(sn76489 *s)
 
 void sn_render(sn76489 *s, int16_t *out, int n)
 {
+    /* Re-sync the render timeline to the emulator's published clock.
+     * Without this, the gap between core start and the first audio pull
+     * becomes a permanent delay, and the ~0.1% difference between the
+     * vsync-locked frame clock and the nominal NTSC rate accumulates
+     * without bound. Trail the emulator by ~50 ms; snap (applying any
+     * skipped writes in order) when drift leaves the window. */
+    enum { TARGET_LEAD = 2205, MAX_LEAD = 8820 };
+    uint64_t emu_pos = s->emu_pos;
+    int64_t lead = (int64_t)(emu_pos - s->sample_pos);
     int i;
+
+    if (emu_pos > TARGET_LEAD && (lead < 0 || lead > MAX_LEAD)) {
+        uint64_t target = emu_pos - TARGET_LEAD;
+        while (s->qr != s->qw &&
+               s->queue[s->qr & (SN_QUEUE_LEN - 1)].when <= target) {
+            apply_write(s, s->queue[s->qr & (SN_QUEUE_LEN - 1)].val);
+            s->qr++;
+        }
+        s->sample_pos = target;
+    }
+
     for (i = 0; i < n; i++) {
         /* apply queued writes due at this output sample */
         while (s->qr != s->qw &&

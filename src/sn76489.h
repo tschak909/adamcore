@@ -30,6 +30,7 @@ typedef struct {
     uint32_t clock;      /* PSG input clock, Hz */
     uint32_t rate;       /* output sample rate */
     uint64_t sample_pos; /* samples synthesized so far */
+    volatile uint64_t emu_pos; /* emulator's position on the sample clock */
     uint32_t tick_acc;   /* 16.16 fixed-point tick accumulator */
     uint32_t ticks_per_sample; /* 16.16: (clock/16)/rate */
 
@@ -42,6 +43,10 @@ void sn_reset(sn76489 *s, uint32_t clock, uint32_t rate);
 
 /* Emu thread: queue a PSG bus write occurring at absolute CPU cycle count. */
 void sn_write(sn76489 *s, uint64_t cpu_cycles, uint8_t val);
+
+/* Emu thread, once per frame: publish the emulated clock so the renderer
+ * can keep its timeline a fixed short latency behind the emulator. */
+void sn_publish(sn76489 *s, uint64_t cpu_cycles);
 
 /* Audio thread: synthesize n mono S16 samples. */
 void sn_render(sn76489 *s, int16_t *out, int n);

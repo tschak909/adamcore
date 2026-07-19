@@ -289,6 +289,8 @@ int adamcore_run_frame(adamcore *c)
         adamnet_scan(&c->an);
     }
 
+    sn_publish(&c->psg, c->cpu.cycles);
+
     /* borders */
     bd = tms_backdrop(&c->vdp);
     {
