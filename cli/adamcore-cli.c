@@ -43,6 +43,9 @@ int main(int argc, char **argv)
     int ppm_every = 0;
     const char *wav = NULL;
     int stdin_keys = 0;
+    int type_frame = -1;
+    const char *type_text = NULL;
+    int reset_at = -1, reset_mode = 0;
     int i;
 
     memset(&cfg, 0, sizeof(cfg));
@@ -67,6 +70,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--ppm-every")) { ppm_every = atoi(argv[++i]); ppm_prefix = argv[++i]; }
         else if (!strcmp(a, "--wav")) wav = argv[++i];
         else if (!strcmp(a, "--stdin-keys")) stdin_keys = 1;
+        else if (!strcmp(a, "--type")) { type_frame = atoi(argv[++i]); type_text = argv[++i]; }
+        else if (!strcmp(a, "--reset-at")) { reset_at = atoi(argv[++i]); reset_mode = atoi(argv[++i]); }
         else { fprintf(stderr, "unknown arg %s\n", a); return 2; }
     }
 
@@ -88,6 +93,8 @@ int main(int argc, char **argv)
         }
 
         for (f = 0; f < frames; f++) {
+            if (f == reset_at)
+                adamcore_request_reset(c, reset_mode);
             adamcore_run_frame(c);
 
             if (stdin_keys) {
@@ -96,6 +103,11 @@ int main(int argc, char **argv)
                 ssize_t k;
                 for (k = 0; k < n; k++)
                     adamcore_inject_key(c, kb[k] == '\n' ? 0x0D : kb[k]);
+            }
+            if (type_text && *type_text && f >= type_frame &&
+                (f - type_frame) % 8 == 0) {
+                uint8_t ch = (uint8_t)*type_text++;
+                adamcore_inject_key(c, ch == '\n' ? 0x0D : ch);
             }
             if (wf) {
                 /* 44100/59.922 = 736 samples per frame */

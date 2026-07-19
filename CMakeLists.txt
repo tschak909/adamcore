@@ -18,6 +18,7 @@ add_library(adamcore STATIC
   src/machine.c
   src/cart.c
   src/adamnet.c
+  src/boip.c
   src/palette.c
 )
 target_include_directories(adamcore PUBLIC include PRIVATE src)
@@ -25,6 +26,10 @@ set_property(TARGET adamcore PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 add_executable(adamcore-cli cli/adamcore-cli.c)
 target_link_libraries(adamcore-cli adamcore)
+
+add_executable(eos_trace tests/machine/eos_trace.c)
+target_include_directories(eos_trace PRIVATE src)
+target_link_libraries(eos_trace adamcore)
 
 enable_testing()
 
