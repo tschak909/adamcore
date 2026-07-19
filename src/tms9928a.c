@@ -240,11 +240,15 @@ void tms_render_line(tms9928a *v, int y)
                 v->line[col * 8 + px] = (bits & (0x80 >> px)) ? fgc : bgc;
         }
     } else {
-        /* Graphics II: three 256-char thirds with maskable pattern/color */
+        /* Graphics II: three 256-char thirds with maskable pattern/color.
+         * R4 bits 1-0 mask character-index bits 9-8 (pattern table);
+         * R3 bits 6-0 mask character-index bits 9-3 (color table): the
+         * register bits stand in for the address lines the multiplied
+         * index drives, per the TI datasheet's address-generation table. */
         uint16_t pat_base = (uint16_t)((v->regs[4] & 0x04) << 11);
         uint16_t col_base = (uint16_t)((v->regs[3] & 0x80) << 6);
         uint16_t pat_mask = (uint16_t)(((v->regs[4] & 0x03) << 8) | 0xFF);
-        uint16_t col_mask = (uint16_t)(((v->regs[3] & 0x7F) << 1) | 1);
+        uint16_t col_mask = (uint16_t)(((v->regs[3] & 0x7F) << 3) | 7);
         int row = y >> 3, line = y & 7, col;
         int third = (row >> 3) << 8;
         for (col = 0; col < 32; col++) {
