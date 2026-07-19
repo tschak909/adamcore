@@ -19,6 +19,7 @@ add_library(adamcore STATIC
   src/cart.c
   src/adamnet.c
   src/boip.c
+  src/net_posix.c
   src/palette.c
 )
 target_include_directories(adamcore PUBLIC include PRIVATE src)

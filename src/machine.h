@@ -51,6 +51,7 @@ struct adamcore {
     uint8_t joy_mode; /* strobe state: 0 keypad, 1 joystick */
 
     uint64_t frame_start_cycles;
+    unsigned long nmi_count;
 };
 
 #endif

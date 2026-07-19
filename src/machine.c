@@ -120,8 +120,13 @@ static uint8_t io_read(void *ud, uint16_t port)
     switch (p & 0xE0) {
     case 0x20: return c->net_ctrl;
     case 0x60: return c->mem_ctrl;
-    case 0xA0: return (p & 1) ? tms_read_status(&c->vdp)
-                              : tms_read_data(&c->vdp);
+    case 0xA0:
+        if (p & 1) {
+            uint8_t v = tms_read_status(&c->vdp);
+            tms_int_pin(&c->vdp); /* reading status drops the INT line */
+            return v;
+        }
+        return tms_read_data(&c->vdp);
     case 0xE0: return controller_read(c, (p >> 1) & 1);
     default: return 0xFF;
     }
@@ -146,8 +151,14 @@ static void io_write(void *ud, uint16_t port, uint8_t v)
         break;
     case 0x80: c->joy_mode = 0; break; /* keypad strobe */
     case 0xA0:
-        if (p & 1) tms_write_ctrl(&c->vdp, v);
-        else tms_write_data(&c->vdp, v);
+        if (p & 1) {
+            tms_write_ctrl(&c->vdp, v);
+            /* enabling IE while F is pending must raise the line */
+            if (tms_int_pin(&c->vdp))
+                z80_nmi(&c->cpu);
+        } else {
+            tms_write_data(&c->vdp, v);
+        }
         break;
     case 0xC0: c->joy_mode = 1; break; /* joystick strobe */
     case 0xE0: sn_write(&c->psg, c->cpu.cycles, v); break;
@@ -270,8 +281,10 @@ int adamcore_run_frame(adamcore *c)
             for (x = 0; x < ADAMCORE_FB_WIDTH; x++)
                 row[x] = c->palette_rgb[c->vdp.line[x]];
         } else if (line == TMS_ACTIVE_H) {
-            if (tms_vblank(&c->vdp))
+            if (tms_vblank(&c->vdp)) {
                 z80_nmi(&c->cpu);
+                c->nmi_count++;
+            }
         }
         adamnet_scan(&c->an);
     }

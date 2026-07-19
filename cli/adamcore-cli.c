@@ -12,9 +12,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "adamcore.h"
+#include "../src/machine.h"
 
 static void write_ppm(const char *path, const uint16_t *fb, int w, int h)
 {
@@ -46,6 +48,10 @@ int main(int argc, char **argv)
     int type_frame = -1;
     const char *type_text = NULL;
     int reset_at = -1, reset_mode = 0;
+    int throttle = 0;
+    int pc_hist = 0;
+    const char *dump_ram = NULL;
+    static unsigned long hist[65536];
     int i;
 
     memset(&cfg, 0, sizeof(cfg));
@@ -72,6 +78,9 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--stdin-keys")) stdin_keys = 1;
         else if (!strcmp(a, "--type")) { type_frame = atoi(argv[++i]); type_text = argv[++i]; }
         else if (!strcmp(a, "--reset-at")) { reset_at = atoi(argv[++i]); reset_mode = atoi(argv[++i]); }
+        else if (!strcmp(a, "--throttle")) throttle = 1;
+        else if (!strcmp(a, "--pc-hist")) pc_hist = 1;
+        else if (!strcmp(a, "--dump-ram")) dump_ram = argv[++i];
         else { fprintf(stderr, "unknown arg %s\n", a); return 2; }
     }
 
@@ -92,10 +101,21 @@ int main(int argc, char **argv)
             if (wf) fseek(wf, 44, SEEK_SET); /* header written at end */
         }
 
+        struct timespec next;
+        clock_gettime(CLOCK_MONOTONIC, &next);
         for (f = 0; f < frames; f++) {
+            if (throttle) {
+                next.tv_nsec += 16688000; /* 59.922 Hz */
+                while (next.tv_nsec >= 1000000000) {
+                    next.tv_nsec -= 1000000000;
+                    next.tv_sec++;
+                }
+                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+            }
             if (f == reset_at)
                 adamcore_request_reset(c, reset_mode);
             adamcore_run_frame(c);
+            if (pc_hist) hist[((struct adamcore *)c)->cpu.pc]++;
 
             if (stdin_keys) {
                 unsigned char kb[64];
@@ -150,6 +170,24 @@ int main(int argc, char **argv)
             fwrite("data", 1, 4, wf); fwrite(&data, 4, 1, wf);
             fclose(wf);
         }
+    }
+
+    if (dump_ram) {
+        FILE *df = fopen(dump_ram, "wb");
+        if (df) {
+            fwrite(((struct adamcore *)c)->ram, 1, 65536, df);
+            fclose(df);
+        }
+    }
+    if (pc_hist) {
+        int k;
+        fprintf(stderr, "NMIs delivered: %lu over %d frames (VDP R1=%02X)\n",
+                ((struct adamcore *)c)->nmi_count, frames,
+                ((struct adamcore *)c)->vdp.regs[1]);
+        fprintf(stderr, "PC histogram (top):\n");
+        for (k = 0; k < 65536; k++)
+            if (hist[k] > frames / 50)
+                fprintf(stderr, "  %04X x%lu\n", k, hist[k]);
     }
 
     adamcore_destroy(c);

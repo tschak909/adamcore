@@ -24,6 +24,8 @@
  * link is up (M-D), else completed with the timeout status.
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "adamnet.h"
@@ -177,6 +179,17 @@ void adamnet_scan(adamnet *an)
 
         if (dcmd < CMD_STATUS || dcmd > CMD_READ)
             continue;
+
+        if (getenv("ADAMCORE_AN_TRACE")) {
+            static uint32_t last_tag;
+            uint32_t tag = ((uint32_t)d << 8) | (dev << 4) | dcmd;
+            if (tag != last_tag) {
+                fprintf(stderr, "AN: dcb=%04X dev=%X cmd=%d len=%u\n", d,
+                        dev, dcmd,
+                        m[(uint16_t)(d + 3)] | (m[(uint16_t)(d + 4)] << 8));
+                last_tag = tag;
+            }
+        }
 
         if (dev == 0x01) {
             keyboard_dispatch(an, d, dcmd);
