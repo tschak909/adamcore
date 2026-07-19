@@ -13,9 +13,18 @@ add_compile_options(-Wall -Wextra)
 # Sources grow milestone by milestone; see README.
 add_library(adamcore STATIC
   src/z80.c
+  src/tms9928a.c
+  src/sn76489.c
+  src/machine.c
+  src/cart.c
+  src/adamnet.c
+  src/palette.c
 )
 target_include_directories(adamcore PUBLIC include PRIVATE src)
 set_property(TARGET adamcore PROPERTY POSITION_INDEPENDENT_CODE ON)
+
+add_executable(adamcore-cli cli/adamcore-cli.c)
+target_link_libraries(adamcore-cli adamcore)
 
 enable_testing()
 
