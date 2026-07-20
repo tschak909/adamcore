@@ -37,6 +37,8 @@ static int peer_fd = -1;
 static uint8_t disk[4][1024]; /* 4 canned blocks */
 static int corrupt_next_data; /* force one bad checksum */
 static int stall_receive_ms;  /* silent-seek simulation */
+static int clr_discard_first; /* dev 4: swallow the first CLR, as a
+                                 node long-read wait_for_idle would */
 static int char9_recv_seen;   /* dev 9: swallow the first RECEIVE, as a
                                  node long-command wait_for_idle would */
 static int net10_body;        /* dev 10: a one-shot protocol body that a
@@ -211,6 +213,13 @@ static void *peer_thread(void *arg)
             case 0x3: { /* CLR */
                 if (dev == 4) {
                     static uint8_t r[1028];
+                    if (clr_discard_first) {
+                        /* a node long-read ends in wait_for_idle()/
+                         * discardInput() that eats this CLR: answer nothing,
+                         * so the master must re-poll CLR to get the block */
+                        clr_discard_first = 0;
+                        break;
+                    }
                     r[0] = (uint8_t)(0xB0 | dev);
                     r[1] = 0x04;
                     r[2] = 0x00;
@@ -343,6 +352,15 @@ int main(void)
     post_dcb(4, 4, 0x4000, 1024, 1);
     check("stalled read completes 0x80", wait_done(3000) == 0x80);
     check("stalled read data", m[0x4000] == 0xA1);
+
+    /* 3b. block read whose CLR the node discarded (long TNFS read ->
+     *     wait_for_idle): the master must re-poll CLR and still complete
+     *     promptly. Without the B_BRD_DATA re-poll it stalls to TIMEOUT_MS
+     *     and the read fails/returns late -- the DKJr-over-TNFS corruption. */
+    clr_discard_first = 1;
+    post_dcb(4, 4, 0x4000, 1024, 0);
+    check("clr-discard read completes 0x80", wait_done(1500) == 0x80);
+    check("clr-discard read data", m[0x4000] == 0xA0 && m[0x4000 + 1023] == 0xA0);
 
     /* 4. CLR retry on corrupted checksum */
     corrupt_next_data = 1;

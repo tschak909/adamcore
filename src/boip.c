@@ -576,6 +576,20 @@ static void advance(struct boip *b)
          * retried -- the intermittent multi-second hitch seen on TNFS
          * directory lists and network apps but never on SD. */
         tx1(b, 4);
+    /* Same node-long-command hazard on the block-read CLR: a slow read (a TNFS
+     * block is a real network round-trip) ends in wait_for_idle()->
+     * discardInput(), which can drop the CLR we send right after the single
+     * RECEIVE ACK. B_BRD_DATA otherwise stalled until TIMEOUT_MS and the read
+     * returned late/wrong data -- observed as Donkey Kong Jr (mounted over
+     * TNFS) loading a garbage VDP script and corrupting the display. Re-issuing
+     * CLR is idempotent: the node's block buffer persists, so it just re-sends
+     * the same 1024 bytes. Only fires on true silence (a slow-but-arriving DATA
+     * leaves rx bytes buffered, so no spurious re-poll mid-transfer).
+     * (The block-number SEND is not re-polled: it is not preceded by a long
+     * command, so it is never discarded, and re-sending it could let a stray
+     * duplicate ACK be mistaken for the following RECEIVE ACK.) */
+    if (b->state == B_BRD_DATA && now - b->t_last_poll >= REPOLL_MS)
+        tx1(b, 3); /* re-send CLR */
 }
 
 /* ---- public ---------------------------------------------------------------- */
