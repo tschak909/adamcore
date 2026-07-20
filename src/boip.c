@@ -326,6 +326,16 @@ static int is_block_dev(uint8_t dev)
     return dev >= 4 && dev <= 8;
 }
 
+/* Network devices (N1..N6) run a stateful protocol whose RECEIVE is not a
+ * side-effect-free "is a response pending?" probe: it drives the lazy
+ * protocol read (e.g. kicks off the HTTP GET and stages the body). The
+ * pre-write purge below must be skipped for them or it fetches and then
+ * discards that body. */
+static int is_net_dev(uint8_t dev)
+{
+    return dev >= 9 && dev <= 14;
+}
+
 /* ---- response parsing ------------------------------------------------------ */
 
 static void handle_status_resp(struct boip *b)
@@ -636,6 +646,17 @@ void boip_dispatch(struct boip *b, struct adamcore *mc, uint16_t d,
         if (is_block_dev(dev)) {
             b->state = B_BWR_BLKNUM_ACK;
             send_blocknum(b);
+        } else if (is_net_dev(dev)) {
+            /* Never purge a network device: its RECEIVE triggers the lazy
+             * protocol read, so a purge probe fetches the response body and
+             * then throws it away. Observed as ISS hanging on "FETCHING
+             * DATA" -- the pre-CHANNEL_MODE purge drained the iss-now.json
+             * body (delivered as a 112-byte DATA packet) before the JSON
+             * parser could read it. Send the command directly; these devices
+             * don't accumulate the stale Fuji-style responses the purge
+             * (added for the mount-corruption workaround, whose real cause
+             * was the double-param(0) bug) was built for. */
+            cwr_send_now(b);
         } else {
             b->state = B_CWR_PURGE_RX;
             tx1(b, 4); /* RECEIVE: probe for a stale pending response */

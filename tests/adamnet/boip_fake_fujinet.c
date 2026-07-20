@@ -39,6 +39,8 @@ static int corrupt_next_data; /* force one bad checksum */
 static int stall_receive_ms;  /* silent-seek simulation */
 static int char9_recv_seen;   /* dev 9: swallow the first RECEIVE, as a
                                  node long-command wait_for_idle would */
+static int net10_body;        /* dev 10: a one-shot protocol body that a
+                                 RECEIVE probe would fetch/consume */
 
 static uint8_t xck(const uint8_t *p, int n)
 {
@@ -96,6 +98,41 @@ static void *peer_thread(void *arg)
 
             if (dev == 3) continue; /* keep-alive READY: no response */
             if (dev == 6) continue; /* "absent" device: silence */
+
+            if (dev == 10) {
+                /* Network device: RECEIVE is *not* a passive probe -- it
+                 * would drive the protocol read and stage the body. Model a
+                 * one-shot body: RECEIVE ACKs while it's pending, CLR delivers
+                 * and consumes it. If the master purges before a write, the
+                 * body is drained here and a later read finds nothing. */
+                if (type == 0x6) { /* SEND: a command write; consume + ACK */
+                    uint8_t hdr[2], ack = (uint8_t)(0x90 | dev);
+                    uint16_t l;
+                    static uint8_t pay[1100];
+                    peer_read(hdr, 2);
+                    l = (uint16_t)((hdr[0] << 8) | hdr[1]);
+                    peer_read(pay, l + 1); /* payload + ck */
+                    peer_send(&ack, 1);
+                } else if (type == 0x4) { /* RECEIVE probe */
+                    uint8_t r = (uint8_t)((net10_body ? 0x90 : 0xC0) | dev);
+                    peer_send(&r, 1);
+                } else if (type == 0x3) { /* CLR: deliver + consume once */
+                    if (net10_body) {
+                        uint8_t r[12];
+                        r[0] = (uint8_t)(0xB0 | dev);
+                        r[1] = 0x00;
+                        r[2] = 0x08;
+                        memset(&r[3], 0xD5, 8);
+                        r[11] = xck(&r[3], 8);
+                        peer_send(r, 12);
+                        net10_body = 0;
+                    } else {
+                        uint8_t nak = (uint8_t)(0xC0 | dev);
+                        peer_send(&nak, 1);
+                    }
+                }
+                continue;
+            }
 
             if (dev == 9) {
                 /* Char device modelling a *node-side long command*: the
@@ -337,6 +374,21 @@ int main(void)
     check("discarded char read completes 0x80", wait_done(500) == 0x80);
     check("discarded char read data",
           m[0x4800] == 0xC9 && m[0x4800 + 7] == 0xC9);
+
+    /* 9. A char WRITE to a network device must NOT purge (drain) a pending
+     *    protocol response: on a network device RECEIVE drives the read, so a
+     *    purge fetches and discards the body. Stage a one-shot body, write a
+     *    command, then read -- the read must still get the body. Without the
+     *    net-device purge skip the write consumes it and the read is empty. */
+    net10_body = 1;
+    m[0x4900] = 0x11;
+    m[0x4901] = 0x22; /* a 2-byte command payload */
+    post_dcb(10, 3, 0x4900, 2, 0);
+    check("net write completes 0x80", wait_done(1000) == 0x80);
+    post_dcb(10, 4, 0x4A00, 16, 0);
+    check("net read after write keeps body 0x80", wait_done(1000) == 0x80);
+    check("net read body intact",
+          m[0x4A00] == 0xD5 && m[0x4A00 + 7] == 0xD5);
 
     printf("boip_fake_fujinet: %s\n", failures ? "FAILURES" : "all ok");
     adamcore_destroy(C);
