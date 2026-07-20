@@ -550,8 +550,22 @@ static void advance(struct boip *b)
         complete(b, ST_TIMEOUT);
         return;
     }
-    if (b->state == B_BRD_RECEIVE && now - b->t_last_poll >= REPOLL_MS)
-        tx1(b, 4); /* seek stall: re-poll RECEIVE until the single ACK */
+    if ((b->state == B_BRD_RECEIVE || b->state == B_CRD_RECEIVE) &&
+        now - b->t_last_poll >= REPOLL_MS)
+        /* Re-poll RECEIVE until the single ACK.
+         *   Block (B_BRD_RECEIVE): rides out a silent seek stall.
+         *   Char (B_CRD_RECEIVE): rides out a *node-side long command*.
+         * When a FujiNet handler blocks the bus longer than
+         * ADAMNET_LONG_CMD_US (a TNFS readdir or a network read is a real
+         * network round-trip, unlike a local SD read), it finishes with
+         * wait_for_idle()->discardInput(), which throws away the RECEIVE we
+         * already sent. The node's resync is built on the assumption that the
+         * master keeps re-polling RECEIVE every ~2 ms (see the
+         * ADAMNET_LONG_CMD_US note in fujinet-pc); without this, a discarded
+         * char RECEIVE stalled here until TIMEOUT_MS (5 s) and the guest
+         * retried -- the intermittent multi-second hitch seen on TNFS
+         * directory lists and network apps but never on SD. */
+        tx1(b, 4);
 }
 
 /* ---- public ---------------------------------------------------------------- */

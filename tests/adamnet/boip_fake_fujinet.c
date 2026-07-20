@@ -37,6 +37,8 @@ static int peer_fd = -1;
 static uint8_t disk[4][1024]; /* 4 canned blocks */
 static int corrupt_next_data; /* force one bad checksum */
 static int stall_receive_ms;  /* silent-seek simulation */
+static int char9_recv_seen;   /* dev 9: swallow the first RECEIVE, as a
+                                 node long-command wait_for_idle would */
 
 static uint8_t xck(const uint8_t *p, int n)
 {
@@ -94,6 +96,32 @@ static void *peer_thread(void *arg)
 
             if (dev == 3) continue; /* keep-alive READY: no response */
             if (dev == 6) continue; /* "absent" device: silence */
+
+            if (dev == 9) {
+                /* Char device modelling a *node-side long command*: the
+                 * handler blocks past ADAMNET_LONG_CMD_US and finishes with
+                 * wait_for_idle()->discardInput(), which drops the RECEIVE
+                 * the master already sent. We emulate that by staying silent
+                 * on the first RECEIVE. The master must re-poll RECEIVE to
+                 * resync; a later RECEIVE is ACKed and CLR delivers the data. */
+                if (type == 0x4) { /* RECEIVE */
+                    if (!char9_recv_seen) {
+                        char9_recv_seen = 1; /* "discarded": no response */
+                    } else {
+                        uint8_t ack = (uint8_t)(0x90 | dev);
+                        peer_send(&ack, 1);
+                    }
+                } else if (type == 0x3) { /* CLR: deliver buffered response */
+                    uint8_t r[12];
+                    r[0] = (uint8_t)(0xB0 | dev);
+                    r[1] = 0x00;
+                    r[2] = 0x08;
+                    memset(&r[3], 0xC9, 8);
+                    r[11] = xck(&r[3], 8);
+                    peer_send(r, 12);
+                }
+                continue;
+            }
 
             switch (type) {
             case 0x0: /* RESET */
@@ -299,6 +327,16 @@ int main(void)
     /* 7. absent device -> timeout 0x9B */
     post_dcb(6, 1, 0, 0, 0);
     check("absent device status 0x9B", wait_done(2000) == 0x9B);
+
+    /* 8. char read whose first RECEIVE the node discarded (long command):
+     *    the master must re-poll RECEIVE and still complete promptly. Without
+     *    the char re-poll it stalls until TIMEOUT_MS (5 s), so a 500 ms budget
+     *    both proves the fix and fails loudly on a regression. */
+    char9_recv_seen = 0;
+    post_dcb(9, 4, 0x4800, 16, 0);
+    check("discarded char read completes 0x80", wait_done(500) == 0x80);
+    check("discarded char read data",
+          m[0x4800] == 0xC9 && m[0x4800 + 7] == 0xC9);
 
     printf("boip_fake_fujinet: %s\n", failures ? "FAILURES" : "all ok");
     adamcore_destroy(C);
