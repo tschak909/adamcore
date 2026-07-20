@@ -56,6 +56,16 @@ enum {
     ST_TIMEOUT = 0x9B,
 
     REPOLL_MS = 2,
+    /* The block-read CLR re-poll needs a far longer cadence than the RECEIVE
+     * re-poll. RECEIVE re-polls are idempotent (surplus ones are answered with
+     * silence), but a re-polled CLR makes the node re-send the whole 1024-byte
+     * block, so a re-poll that fires while a normal DATA is merely in flight
+     * yields a stray block that desynchronizes a later read. On Android the
+     * CLR->DATA round-trip is thread-scheduled and routinely exceeds a few ms,
+     * so the cadence must clear that: long enough that a surviving CLR's DATA
+     * always lands first, short enough to still recover a genuinely dropped
+     * CLR well before TIMEOUT_MS. */
+    BRD_CLR_REPOLL_MS = 60,
     /* After serving a response FujiNet's bus loop discards its input
      * FIFO (wait_for_idle); a command sent back-to-back lands in that
      * window and is silently eaten. The real bus's turnaround time
@@ -588,7 +598,7 @@ static void advance(struct boip *b)
      * (The block-number SEND is not re-polled: it is not preceded by a long
      * command, so it is never discarded, and re-sending it could let a stray
      * duplicate ACK be mistaken for the following RECEIVE ACK.) */
-    if (b->state == B_BRD_DATA && now - b->t_last_poll >= REPOLL_MS)
+    if (b->state == B_BRD_DATA && now - b->t_last_poll >= BRD_CLR_REPOLL_MS)
         tx1(b, 3); /* re-send CLR */
 }
 
