@@ -47,6 +47,8 @@ int main(int argc, char **argv)
     int stdin_keys = 0;
     int type_frame = -1;
     const char *type_text = NULL;
+    int type2_frame = -1;
+    const char *type2_text = NULL;
     int reset_at = -1, reset_mode = 0;
     int throttle = 0;
     int jitter = 0;
@@ -78,6 +80,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--wav")) wav = argv[++i];
         else if (!strcmp(a, "--stdin-keys")) stdin_keys = 1;
         else if (!strcmp(a, "--type")) { type_frame = atoi(argv[++i]); type_text = argv[++i]; }
+        else if (!strcmp(a, "--type2")) { type2_frame = atoi(argv[++i]); type2_text = argv[++i]; }
         else if (!strcmp(a, "--reset-at")) { reset_at = atoi(argv[++i]); reset_mode = atoi(argv[++i]); }
         else if (!strcmp(a, "--throttle")) throttle = 1;
         else if (!strcmp(a, "--jitter")) jitter = 1;
@@ -127,6 +130,11 @@ int main(int argc, char **argv)
                 ssize_t k;
                 for (k = 0; k < n; k++)
                     adamcore_inject_key(c, kb[k] == '\n' ? 0x0D : kb[k]);
+            }
+            if (type2_text && *type2_text && f >= type2_frame &&
+                (f - type2_frame) % 8 == 0) {
+                uint8_t c2 = (uint8_t)*type2_text++;
+                adamcore_inject_key(c, c2 == '\n' ? 0x0D : c2);
             }
             if (type_text && *type_text && f >= type_frame &&
                 (f - type_frame) % 8 == 0) {

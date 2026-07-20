@@ -40,7 +40,13 @@ enum {
     B_BWR_DATA_ACK,
     B_CRD_RECEIVE,
     B_CRD_DATA,
-    B_CWR_ACK
+    B_CWR_ACK,
+    /* purge of a stale unconsumed device response before a new command:
+     * an abandoned read (guest gave up / host stalled) leaves the node's
+     * prepared response pending; sending the next command without
+     * consuming it desynchronizes every following read (stale data). */
+    B_CWR_PURGE_RX,
+    B_CWR_PURGE_DATA
 };
 
 enum {
@@ -49,6 +55,7 @@ enum {
     ST_TIMEOUT = 0x9B,
 
     REPOLL_MS = 2,
+    PURGE_TIMEOUT_MS = 250,
     CRD_RETRY_MS = 10, /* re-poll cadence for a char device that answered
                           with "nothing yet" (NAK or empty DATA) */
     TIMEOUT_MS = 5000,
@@ -159,6 +166,29 @@ void boip_bus_reset(struct boip *b)
 
 /* ---- transaction plumbing -------------------------------------------------- */
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <unistd.h>
+/* On Android the trace is armed by a flag file (adb shell touch) and
+ * lands in logcat under the AdamBoIP tag. */
+static int wire_trace(void)
+{
+    static int t = -1;
+    if (t < 0) t = access("/data/local/tmp/adamcore-trace", F_OK) == 0;
+    return t;
+}
+
+static void dump_bytes(const char *dir, const uint8_t *p, int n)
+{
+    char line[128];
+    int i, off = 0, lim = n > 16 ? 16 : n;
+    for (i = 0; i < lim && off < (int)sizeof(line) - 4; i++)
+        off += snprintf(line + off, sizeof(line) - (size_t)off, " %02X", p[i]);
+    __android_log_print(ANDROID_LOG_INFO, "AdamBoIP", "[%llu] %s %d:%s%s",
+                        (unsigned long long)net_now_ms(), dir, n, line,
+                        n > 16 ? " ..." : "");
+}
+#else
 static int wire_trace(void)
 {
     static int t = -1;
@@ -173,6 +203,7 @@ static void dump_bytes(const char *dir, const uint8_t *p, int n)
     for (i = 0; i < lim; i++) fprintf(stderr, " %02X", p[i]);
     fprintf(stderr, n > 16 ? " ...\n" : "\n");
 }
+#endif
 
 static void tx(struct boip *b, const uint8_t *pkt, int n)
 {
@@ -257,6 +288,17 @@ static void send_payload(struct boip *b, const uint8_t *data, uint16_t len)
     pkt[3 + len] = xor_ck(data, len);
     tx(b, pkt, 4 + len);
     b->t_last_poll = net_now_ms();
+}
+
+static void cwr_send_now(struct boip *b)
+{
+    uint8_t *m = b->mc->ram;
+    uint16_t len = dcb_buf_len(b);
+    if (len == 0 || len > 1024) len = 1024;
+    b->state = B_CWR_ACK;
+    b->t_start = net_now_ms();
+    b->rxlen = 0;
+    send_payload(b, &m[dcb_buf_addr(b)], len);
 }
 
 static int is_block_dev(uint8_t dev)
@@ -418,6 +460,26 @@ static void advance(struct boip *b)
             if (t == 0x9) { complete(b, ST_OK); return; }
             if (t == 0xC) { complete(b, ST_TIMEOUT); return; }
             break;
+        case B_CWR_PURGE_RX:
+            if (t == 0x9) { /* stale response exists: drain it */
+                b->rxlen = 0;
+                b->state = B_CWR_PURGE_DATA;
+                tx1(b, 3); /* CLR */
+                return;
+            }
+            if (t == 0xC) { cwr_send_now(b); return; } /* nothing stale */
+            break;
+        case B_CWR_PURGE_DATA:
+            if (t == 0xB) {
+                uint16_t len;
+                if (b->rxlen < 3) return;
+                len = (uint16_t)((b->rx[1] << 8) | b->rx[2]);
+                if (len <= 1024 && b->rxlen < 4 + len) return;
+                cwr_send_now(b); /* stale data discarded */
+                return;
+            }
+            if (t == 0xC) { cwr_send_now(b); return; }
+            break;
         default:
             break;
         }
@@ -428,6 +490,11 @@ static void advance(struct boip *b)
     }
 
     /* silence handling */
+    if (b->state == B_CWR_PURGE_RX || b->state == B_CWR_PURGE_DATA) {
+        if (now - b->t_start > PURGE_TIMEOUT_MS)
+            cwr_send_now(b);
+        return;
+    }
     if (b->state == B_STATUS_WAIT) {
         if (now - b->t_start > STATUS_TIMEOUT_MS) {
             /* the real master retries a quiet node before giving up;
@@ -516,11 +583,8 @@ void boip_dispatch(struct boip *b, struct adamcore *mc, uint16_t d,
             b->state = B_BWR_BLKNUM_ACK;
             send_blocknum(b);
         } else {
-            uint8_t *m = mc->ram;
-            uint16_t len = dcb_buf_len(b);
-            if (len == 0 || len > 1024) len = 1024;
-            b->state = B_CWR_ACK;
-            send_payload(b, &m[dcb_buf_addr(b)], len);
+            b->state = B_CWR_PURGE_RX;
+            tx1(b, 4); /* RECEIVE: probe for a stale pending response */
         }
         break;
     case 4: /* read */
