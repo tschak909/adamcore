@@ -268,7 +268,28 @@ int adamcore_run_frame(adamcore *c)
 
     c->frame_start_cycles = c->cpu.cycles;
     for (line = 0; line < ADAM_FRAME_LINES; line++) {
-        uint64_t target =
+        uint64_t target;
+
+        /* The VBlank interrupt asserts at the start of the first blanking
+         * line, so the guest takes the NMI early in that line. Fire it BEFORE
+         * running this line's CPU slice, not after -- firing after delivers it
+         * a whole line (228 T-states) late, at the start of the next line.
+         * That slip matters: DKJr's per-frame VBlank ISR and its level-load
+         * both drive OS7's block-copy (0x1CF0), which stages source/dest/count
+         * through a single fixed scratch, PARAM_AREA (0x73BA), and is not
+         * re-entrant. A line-late NMI can land in the window between PARAM_
+         * filling 0x73BA and the copy reading it; the ISR's own copy then
+         * overwrites the params and the load writes to a wild VRAM address
+         * (>= 0x4000), whose high byte wraps into VDP *register* writes and
+         * corrupts the whole display. */
+        if (line == TMS_ACTIVE_H) {
+            if (tms_vblank(&c->vdp)) {
+                z80_nmi(&c->cpu);
+                c->nmi_count++;
+            }
+        }
+
+        target =
             c->frame_start_cycles + (uint64_t)(line + 1) * ADAM_LINE_TSTATES;
         while (c->cpu.cycles < target)
             z80_step(&c->cpu);
@@ -280,11 +301,6 @@ int adamcore_run_frame(adamcore *c)
             tms_render_line(&c->vdp, line);
             for (x = 0; x < ADAMCORE_FB_WIDTH; x++)
                 row[x] = c->palette_rgb[c->vdp.line[x]];
-        } else if (line == TMS_ACTIVE_H) {
-            if (tms_vblank(&c->vdp)) {
-                z80_nmi(&c->cpu);
-                c->nmi_count++;
-            }
         }
         adamnet_scan(&c->an);
     }
