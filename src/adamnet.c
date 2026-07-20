@@ -95,6 +95,8 @@ static void keyboard_dispatch(adamnet *an, uint16_t d, uint8_t cmd)
             if (len == 0) len = 1;
             while (n < len && key_available(an))
                 m[(uint16_t)(buf + n++)] = key_pop(an);
+            m[(uint16_t)(d + 3)] = (uint8_t)n; /* transferred length */
+            m[(uint16_t)(d + 4)] = (uint8_t)(n >> 8);
             m[(uint16_t)(d + 0)] = ST_OK;
         }
         break;
@@ -188,11 +190,15 @@ void adamnet_scan(adamnet *an)
 
         if (getenv("ADAMCORE_AN_TRACE")) {
             static uint32_t last_tag;
-            uint32_t tag = ((uint32_t)d << 8) | (dev << 4) | dcmd;
+            uint32_t tag = ((uint32_t)d << 8) | (dev << 4) | dcmd |
+                           ((uint32_t)m[(uint16_t)(d + 5)] << 16);
             if (tag != last_tag) {
-                fprintf(stderr, "AN: dcb=%04X dev=%X cmd=%d len=%u\n", d,
-                        dev, dcmd,
-                        m[(uint16_t)(d + 3)] | (m[(uint16_t)(d + 4)] << 8));
+                fprintf(stderr,
+                        "AN: dcb=%04X dev=%X cmd=%d len=%u blk=%u buf=%04X\n",
+                        d, dev, dcmd,
+                        m[(uint16_t)(d + 3)] | (m[(uint16_t)(d + 4)] << 8),
+                        m[(uint16_t)(d + 5)] | (m[(uint16_t)(d + 6)] << 8),
+                        m[(uint16_t)(d + 1)] | (m[(uint16_t)(d + 2)] << 8));
                 last_tag = tag;
             }
         }

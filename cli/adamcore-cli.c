@@ -18,6 +18,38 @@
 #include "adamcore.h"
 #include "../src/machine.h"
 
+static uint16_t g_watch_base;
+static struct adamcore *g_wc;
+static uint8_t (*g_orig_rd)(void *, uint16_t);
+static void (*g_orig_wr)(void *, uint16_t, uint8_t);
+static int g_watch_events;
+
+static uint8_t watch_rd(void *ud, uint16_t a)
+{
+    uint8_t v = g_orig_rd(ud, a);
+    if (a >= g_watch_base && a < g_watch_base + 21 && g_watch_events < 4000 &&
+        g_wc->cpu.pc != 0xF914 && g_wc->cpu.pc != 0xF9E3) {
+        static uint16_t lastpc; static uint16_t lasta;
+        if (g_wc->cpu.pc != lastpc || a != lasta) {
+            fprintf(stderr, "DCB R +%-2d =%02X pc=%04X\n",
+                    a - g_watch_base, v, g_wc->cpu.pc);
+            g_watch_events++; lastpc = g_wc->cpu.pc; lasta = a;
+        }
+    }
+    return v;
+}
+
+static void watch_wr(void *ud, uint16_t a, uint8_t v)
+{
+    if (a >= g_watch_base && a < g_watch_base + 21 && g_watch_events < 4000 &&
+        g_wc->cpu.pc != 0xF914 && g_wc->cpu.pc != 0xF9E3) {
+        fprintf(stderr, "DCB W +%-2d =%02X pc=%04X\n",
+                a - g_watch_base, v, g_wc->cpu.pc);
+        g_watch_events++;
+    }
+    g_orig_wr(ud, a, v);
+}
+
 static void write_ppm(const char *path, const uint16_t *fb, int w, int h)
 {
     FILE *fp = fopen(path, "wb");
@@ -52,6 +84,7 @@ int main(int argc, char **argv)
     int reset_at = -1, reset_mode = 0;
     int throttle = 0;
     int jitter = 0;
+    int watch_dcb = 0;
     int pc_hist = 0;
     const char *dump_ram = NULL;
     static unsigned long hist[65536];
@@ -84,6 +117,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--reset-at")) { reset_at = atoi(argv[++i]); reset_mode = atoi(argv[++i]); }
         else if (!strcmp(a, "--throttle")) throttle = 1;
         else if (!strcmp(a, "--jitter")) jitter = 1;
+        else if (!strcmp(a, "--watch-dcb")) watch_dcb = (int)strtol(argv[++i], NULL, 16);
         else if (!strcmp(a, "--pc-hist")) pc_hist = 1;
         else if (!strcmp(a, "--dump-ram")) dump_ram = argv[++i];
         else { fprintf(stderr, "unknown arg %s\n", a); return 2; }
@@ -94,6 +128,15 @@ int main(int argc, char **argv)
 
     if (stdin_keys)
         fcntl(0, F_SETFL, O_NONBLOCK);
+
+    if (watch_dcb) {
+        g_watch_base = (uint16_t)watch_dcb;
+        g_wc = (struct adamcore *)c;
+        g_orig_rd = g_wc->cpu.mem_read;
+        g_orig_wr = g_wc->cpu.mem_write;
+        g_wc->cpu.mem_read = watch_rd;
+        g_wc->cpu.mem_write = watch_wr;
+    }
 
     {
         FILE *wf = NULL;

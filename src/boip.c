@@ -46,7 +46,8 @@ enum {
      * prepared response pending; sending the next command without
      * consuming it desynchronizes every following read (stale data). */
     B_CWR_PURGE_RX,
-    B_CWR_PURGE_DATA
+    B_CWR_PURGE_DATA,
+    B_CWR_GAP /* post-purge turnaround wait before the actual SEND */
 };
 
 enum {
@@ -55,6 +56,11 @@ enum {
     ST_TIMEOUT = 0x9B,
 
     REPOLL_MS = 2,
+    /* After serving a response FujiNet's bus loop discards its input
+     * FIFO (wait_for_idle); a command sent back-to-back lands in that
+     * window and is silently eaten. The real bus's turnaround time
+     * makes this impossible on hardware; enforce an equivalent gap. */
+    INTER_TX_GAP_MS = 4,
     PURGE_TIMEOUT_MS = 250,
     CRD_RETRY_MS = 10, /* re-poll cadence for a char device that answered
                           with "nothing yet" (NAK or empty DATA) */
@@ -91,6 +97,7 @@ struct boip {
     uint64_t crd_chain_start;
 
     uint64_t t_keepalive;
+    uint64_t t_last_done; /* when the previous transaction resolved */
 
     int ever_connected;
     int first_connect_pending;
@@ -226,6 +233,7 @@ static void complete(struct boip *b, uint8_t status)
     b->mc->ram[b->dcb] = status;
     b->state = B_IDLE;
     b->rxlen = 0;
+    b->t_last_done = net_now_ms();
 }
 
 static void crd_nothing_yet(struct boip *b, uint64_t now)
@@ -237,6 +245,8 @@ static void crd_nothing_yet(struct boip *b, uint64_t now)
     if (b->crd_chain_dcb == b->dcb &&
         now - b->crd_chain_start > CRD_GIVEUP_MS) {
         b->crd_chain_dcb = 0;
+        b->mc->ram[(uint16_t)(b->dcb + 3)] = 0; /* no data transferred */
+        b->mc->ram[(uint16_t)(b->dcb + 4)] = 0;
         complete(b, ST_NAK);
         return;
     }
@@ -244,6 +254,7 @@ static void crd_nothing_yet(struct boip *b, uint64_t now)
     b->last_crd_nak_ms = now;
     b->state = B_IDLE;
     b->rxlen = 0;
+    b->t_last_done = now;
 }
 
 static uint16_t dcb_buf_addr(struct boip *b)
@@ -290,7 +301,7 @@ static void send_payload(struct boip *b, const uint8_t *data, uint16_t len)
     b->t_last_poll = net_now_ms();
 }
 
-static void cwr_send_now(struct boip *b)
+static void cwr_fire(struct boip *b)
 {
     uint8_t *m = b->mc->ram;
     uint16_t len = dcb_buf_len(b);
@@ -299,6 +310,15 @@ static void cwr_send_now(struct boip *b)
     b->t_start = net_now_ms();
     b->rxlen = 0;
     send_payload(b, &m[dcb_buf_addr(b)], len);
+}
+
+/* The node's post-response input-discard window (wait_for_idle) must
+ * pass before the command goes out, or it eats the command. */
+static void cwr_send_now(struct boip *b)
+{
+    b->state = B_CWR_GAP;
+    b->t_start = net_now_ms();
+    b->rxlen = 0;
 }
 
 static int is_block_dev(uint8_t dev)
@@ -315,7 +335,14 @@ static void handle_status_resp(struct boip *b)
     m[(uint16_t)(b->dcb + 17)] = b->rx[1];
     m[(uint16_t)(b->dcb + 18)] = b->rx[2];
     m[(uint16_t)(b->dcb + 19)] = b->rx[3];
-    m[(uint16_t)(b->dcb + 20)] = b->rx[4];
+    /* NODE TYPE carries the device's error code, which EOS's read-verify
+     * requires to be a ZERO nibble on success (it extracts one nibble,
+     * selected per unit). FujiNet reports 0x40|code; strip the base and
+     * mirror the code into both nibbles so either selection sees it. */
+    {
+        uint8_t code = (uint8_t)(b->rx[4] & 0x0F);
+        m[(uint16_t)(b->dcb + 20)] = (uint8_t)(code | (code << 4));
+    }
     complete(b, ST_OK);
 }
 
@@ -347,6 +374,12 @@ static void handle_data_resp(struct boip *b)
     }
     if (max && n > max) n = max;
     memcpy(&m[buf], &b->rx[3], n);
+    /* Report the transferred length in the DCB buffer-length field:
+     * EOS treats a completion without it as a failed transfer and
+     * retries the whole operation (which also advances stateful
+     * devices like the FujiNet directory cursor a second time). */
+    m[(uint16_t)(b->dcb + 3)] = (uint8_t)n;
+    m[(uint16_t)(b->dcb + 4)] = (uint8_t)(n >> 8);
     b->crd_chain_dcb = 0;
     complete(b, ST_OK);
 }
@@ -490,6 +523,11 @@ static void advance(struct boip *b)
     }
 
     /* silence handling */
+    if (b->state == B_CWR_GAP) {
+        if (now - b->t_start >= INTER_TX_GAP_MS)
+            cwr_fire(b);
+        return;
+    }
     if (b->state == B_CWR_PURGE_RX || b->state == B_CWR_PURGE_DATA) {
         if (now - b->t_start > PURGE_TIMEOUT_MS)
             cwr_send_now(b);
@@ -559,6 +597,8 @@ void boip_dispatch(struct boip *b, struct adamcore *mc, uint16_t d,
 {
     if (b->state != B_IDLE)
         return; /* one transaction at a time; this DCB stays pending */
+    if (net_now_ms() - b->t_last_done < INTER_TX_GAP_MS)
+        return; /* respect the node's post-response turnaround window */
 
     b->mc = mc;
     b->dcb = d;
