@@ -87,7 +87,9 @@ int main(int argc, char **argv)
     int watch_dcb = 0;
     int pc_hist = 0;
     const char *dump_ram = NULL;
+    const char *dump_vram = NULL;
     static unsigned long hist[65536];
+    int kp_frame[8], kp_digit[8], kp_n = 0;
     int i;
 
     memset(&cfg, 0, sizeof(cfg));
@@ -120,6 +122,14 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--watch-dcb")) watch_dcb = (int)strtol(argv[++i], NULL, 16);
         else if (!strcmp(a, "--pc-hist")) pc_hist = 1;
         else if (!strcmp(a, "--dump-ram")) dump_ram = argv[++i];
+        else if (!strcmp(a, "--dump-vram")) dump_vram = argv[++i];
+        else if (!strcmp(a, "--keypad")) {
+            if (kp_n < 8) {
+                kp_frame[kp_n] = atoi(argv[++i]);
+                kp_digit[kp_n] = atoi(argv[++i]);
+                kp_n++;
+            } else { i += 2; }
+        }
         else { fprintf(stderr, "unknown arg %s\n", a); return 2; }
     }
 
@@ -164,6 +174,14 @@ int main(int argc, char **argv)
             }
             if (f == reset_at)
                 adamcore_request_reset(c, reset_mode);
+            if (kp_n) {
+                uint16_t word = 0x7F7F; /* idle */
+                int j;
+                for (j = 0; j < kp_n; j++)
+                    if (f >= kp_frame[j] && f < kp_frame[j] + 12)
+                        word = (uint16_t)(0x7F00 | (0x70 | (kp_digit[j] & 0x0F)));
+                adamcore_set_joystick(c, 0, word);
+            }
             adamcore_run_frame(c);
             if (pc_hist) hist[((struct adamcore *)c)->cpu.pc]++;
 
@@ -239,6 +257,24 @@ int main(int argc, char **argv)
             fwrite(((struct adamcore *)c)->ram, 1, 65536, df);
             fclose(df);
         }
+    }
+    if (dump_ram) { /* also dump expansion RAM alongside */
+        char p[600];
+        snprintf(p, sizeof(p), "%s.xram", dump_ram);
+        FILE *xf = fopen(p, "wb");
+        if (xf) { fwrite(((struct adamcore *)c)->xram, 1, 65536, xf); fclose(xf); }
+    }
+    if (dump_vram) {
+        FILE *df = fopen(dump_vram, "wb");
+        if (df) {
+            fwrite(((struct adamcore *)c)->vdp.vram, 1, 16384, df);
+            fclose(df);
+        }
+        fprintf(stderr, "VDP regs: R0=%02X R1=%02X R2=%02X R3=%02X R4=%02X R5=%02X R6=%02X R7=%02X\n",
+                ((struct adamcore *)c)->vdp.regs[0], ((struct adamcore *)c)->vdp.regs[1],
+                ((struct adamcore *)c)->vdp.regs[2], ((struct adamcore *)c)->vdp.regs[3],
+                ((struct adamcore *)c)->vdp.regs[4], ((struct adamcore *)c)->vdp.regs[5],
+                ((struct adamcore *)c)->vdp.regs[6], ((struct adamcore *)c)->vdp.regs[7]);
     }
     if (pc_hist) {
         int k;

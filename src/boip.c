@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "boip.h"
 #include "machine.h"
@@ -602,6 +603,36 @@ static void advance(struct boip *b)
         tx1(b, 3); /* re-send CLR */
 }
 
+/* Pump the current transaction to completion in real wall-clock time.
+ *
+ * adamcore computes an entire video frame in microseconds and then sleeps
+ * ~16 ms to pace; the peer's socket replies therefore only land during that
+ * sleep, so a naive per-scan advance() makes every BoIP request/response
+ * round-trip cost one whole emulated frame. A block read is 4 round-trips, so
+ * it retired in ~3-4 frames (~50-70 ms). A real ADAM's AdamNet DMA -- and a
+ * local-disk emulator -- finish a block in ~ms, and guests exploit that:
+ * Super Games fire disk reads back to back without re-polling the DCB between
+ * them. Against our slow retire the second read finds the DCB still marked
+ * busy (0x04) and EOS drops it; the missed block leaves a graphics/descriptor
+ * region unloaded and the display corrupts (Donkey Kong Jr's cage tiles).
+ *
+ * Settling gives the peer real time between polls so a block transfer retires
+ * within its frame, matching hardware latency. Bounded so a slow/absent peer
+ * degrades to the old per-frame path instead of hanging. */
+static void boip_settle(struct boip *b)
+{
+    uint64_t start = net_now_ms();
+    while (b->state != B_IDLE && b->fd >= 0) {
+        struct timespec ts = { 0, 150000 }; /* 0.15 ms */
+        advance(b);
+        if (b->state == B_IDLE || b->fd < 0)
+            break;
+        if (net_now_ms() - start > 250)
+            break; /* safety cap: resume the async path next frame */
+        nanosleep(&ts, NULL);
+    }
+}
+
 /* ---- public ---------------------------------------------------------------- */
 
 void boip_poll(struct boip *b)
@@ -709,4 +740,11 @@ void boip_dispatch(struct boip *b, struct adamcore *mc, uint16_t d,
     default:
         break;
     }
+
+    /* Block reads/writes are DMA-fast on real hardware; retire them within the
+     * frame so a guest that fires them back-to-back never sees a stale busy
+     * DCB. Char/network devices are intentionally lazy (their RECEIVE triggers
+     * work host-side) and must stay on the async path. */
+    if (is_block_dev(dev) && (dcmd == 3 || dcmd == 4) && b->state != B_IDLE)
+        boip_settle(b);
 }
