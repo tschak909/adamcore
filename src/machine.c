@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "adamcore_debug.h"
 #include "cart.h"
 #include "machine.h"
 #include "palette.h"
@@ -200,6 +201,17 @@ static int load_rom(const char *path, uint8_t *dst, size_t want)
     return n == want ? 0 : -1;
 }
 
+/* In-memory image when the host provides one, else the file path. */
+static int get_rom(const uint8_t *data, const char *path, uint8_t *dst,
+                   size_t want)
+{
+    if (data) {
+        memcpy(dst, data, want);
+        return 0;
+    }
+    return load_rom(path, dst, want);
+}
+
 /* ---- public API ----------------------------------------------------------- */
 
 adamcore *adamcore_create(const adamcore_config *cfg)
@@ -208,17 +220,20 @@ adamcore *adamcore_create(const adamcore_config *cfg)
     if (!c) return NULL;
     c->cfg = *cfg;
 
-    if (load_rom(cfg->os7_rom_path, c->os7, sizeof(c->os7)) != 0)
+    if (get_rom(cfg->os7_rom_data, cfg->os7_rom_path, c->os7,
+                sizeof(c->os7)) != 0)
         goto fail;
     if (cfg->start_machine == ADAMCORE_MACHINE_ADAM) {
-        if (load_rom(cfg->eos_rom_path, c->eos, sizeof(c->eos)) != 0)
+        if (get_rom(cfg->eos_rom_data, cfg->eos_rom_path, c->eos,
+                    sizeof(c->eos)) != 0)
             goto fail;
-        if (load_rom(cfg->wp_rom_path, c->wp, sizeof(c->wp)) != 0)
+        if (get_rom(cfg->wp_rom_data, cfg->wp_rom_path, c->wp,
+                    sizeof(c->wp)) != 0)
             goto fail;
     } else {
         /* optional in cart-only sessions */
-        load_rom(cfg->eos_rom_path, c->eos, sizeof(c->eos));
-        load_rom(cfg->wp_rom_path, c->wp, sizeof(c->wp));
+        get_rom(cfg->eos_rom_data, cfg->eos_rom_path, c->eos, sizeof(c->eos));
+        get_rom(cfg->wp_rom_data, cfg->wp_rom_path, c->wp, sizeof(c->wp));
     }
     c->cart_size = 0;
     if (cfg->cart_path && cfg->cart_path[0]) {
@@ -255,55 +270,51 @@ void adamcore_destroy(adamcore *c)
     free(c);
 }
 
-int adamcore_run_frame(adamcore *c)
-{
-    int line;
-    uint8_t bd;
-    int reset = c->pending_reset;
+/* ---- frame-loop helpers (shared with debug.c's stepped loop) ------------- */
 
+void machine_apply_pending_reset(adamcore *c)
+{
+    int reset = c->pending_reset;
     if (reset >= 0) {
         c->pending_reset = -1;
         machine_reset(c, reset);
     }
+}
 
-    c->frame_start_cycles = c->cpu.cycles;
-    for (line = 0; line < ADAM_FRAME_LINES; line++) {
-        uint64_t target;
-
-        /* The VBlank interrupt asserts at the start of the first blanking
-         * line, so the guest takes the NMI early in that line. Fire it BEFORE
-         * running this line's CPU slice, not after -- firing after delivers it
-         * a whole line (228 T-states) late, at the start of the next line.
-         * That slip matters: DKJr's per-frame VBlank ISR and its level-load
-         * both drive OS7's block-copy (0x1CF0), which stages source/dest/count
-         * through a single fixed scratch, PARAM_AREA (0x73BA), and is not
-         * re-entrant. A line-late NMI can land in the window between PARAM_
-         * filling 0x73BA and the copy reading it; the ISR's own copy then
-         * overwrites the params and the load writes to a wild VRAM address
-         * (>= 0x4000), whose high byte wraps into VDP *register* writes and
-         * corrupts the whole display. */
-        if (line == TMS_ACTIVE_H) {
-            if (tms_vblank(&c->vdp)) {
-                z80_nmi(&c->cpu);
-                c->nmi_count++;
-            }
-        }
-
-        target =
-            c->frame_start_cycles + (uint64_t)(line + 1) * ADAM_LINE_TSTATES;
-        while (c->cpu.cycles < target)
-            z80_step(&c->cpu);
-
-        if (line < TMS_ACTIVE_H) {
-            uint16_t *row =
-                &c->fb[(line + ADAM_BORDER_TOP) * ADAMCORE_FB_WIDTH];
-            int x;
-            tms_render_line(&c->vdp, line);
-            for (x = 0; x < ADAMCORE_FB_WIDTH; x++)
-                row[x] = c->palette_rgb[c->vdp.line[x]];
-        }
-        adamnet_scan(&c->an);
+/* The VBlank interrupt asserts at the start of the first blanking line, so
+ * the guest takes the NMI early in that line. Fire it BEFORE running that
+ * line's CPU slice, not after -- firing after delivers it a whole line (228
+ * T-states) late, at the start of the next line. That slip matters: DKJr's
+ * per-frame VBlank ISR and its level-load both drive OS7's block-copy
+ * (0x1CF0), which stages source/dest/count through a single fixed scratch,
+ * PARAM_AREA (0x73BA), and is not re-entrant. A line-late NMI can land in
+ * the window between PARAM_ filling 0x73BA and the copy reading it; the
+ * ISR's own copy then overwrites the params and the load writes to a wild
+ * VRAM address (>= 0x4000), whose high byte wraps into VDP *register*
+ * writes and corrupts the whole display. */
+void machine_vblank_nmi(adamcore *c)
+{
+    if (tms_vblank(&c->vdp)) {
+        z80_nmi(&c->cpu);
+        c->nmi_count++;
     }
+}
+
+void machine_line_end(adamcore *c, int line)
+{
+    if (line < TMS_ACTIVE_H) {
+        uint16_t *row = &c->fb[(line + ADAM_BORDER_TOP) * ADAMCORE_FB_WIDTH];
+        int x;
+        tms_render_line(&c->vdp, line);
+        for (x = 0; x < ADAMCORE_FB_WIDTH; x++)
+            row[x] = c->palette_rgb[c->vdp.line[x]];
+    }
+    adamnet_scan(&c->an);
+}
+
+int machine_frame_tail(adamcore *c)
+{
+    uint8_t bd;
 
     sn_publish(&c->psg, c->cpu.cycles);
 
@@ -324,6 +335,48 @@ int adamcore_run_frame(adamcore *c)
         return 1;
     }
     return 0;
+}
+
+uint8_t machine_mem_read(adamcore *c, uint16_t a)
+{
+    return mem_read(c, a); /* pure banked array decode; no device access */
+}
+
+void machine_mem_write(adamcore *c, uint16_t a, uint8_t v)
+{
+    mem_write(c, a, v);
+}
+
+int adamcore_run_frame(adamcore *c)
+{
+    int line;
+
+    if (c->dbg_in_frame) {
+        /* Finish the frame the debugger left partially executed so callers
+         * always observe whole frames from this entry point. */
+        int changed = 0;
+        adamcore_debug_run(c, 0, 0, &changed);
+        return changed;
+    }
+
+    machine_apply_pending_reset(c);
+
+    c->frame_start_cycles = c->cpu.cycles;
+    for (line = 0; line < ADAM_FRAME_LINES; line++) {
+        uint64_t target;
+
+        if (line == TMS_ACTIVE_H)
+            machine_vblank_nmi(c);
+
+        target =
+            c->frame_start_cycles + (uint64_t)(line + 1) * ADAM_LINE_TSTATES;
+        while (c->cpu.cycles < target)
+            z80_step(&c->cpu);
+
+        machine_line_end(c, line);
+    }
+
+    return machine_frame_tail(c);
 }
 
 const uint16_t *adamcore_framebuffer(const adamcore *c, int *w, int *h)

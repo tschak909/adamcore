@@ -11,6 +11,12 @@ endif()
 add_compile_options(-Wall -Wextra)
 
 # Sources grow milestone by milestone; see README.
+if(WIN32)
+  set(ADAMCORE_NET_SOURCE src/net_win32.c)
+else()
+  set(ADAMCORE_NET_SOURCE src/net_posix.c)
+endif()
+
 add_library(adamcore STATIC
   src/z80.c
   src/tms9928a.c
@@ -19,11 +25,15 @@ add_library(adamcore STATIC
   src/cart.c
   src/adamnet.c
   src/boip.c
-  src/net_posix.c
+  ${ADAMCORE_NET_SOURCE}
   src/palette.c
+  src/debug.c
 )
 target_include_directories(adamcore PUBLIC include PRIVATE src)
 set_property(TARGET adamcore PROPERTY POSITION_INDEPENDENT_CODE ON)
+if(WIN32)
+  target_link_libraries(adamcore PUBLIC ws2_32)
+endif()
 
 add_executable(adamcore-cli cli/adamcore-cli.c)
 target_link_libraries(adamcore-cli adamcore)
@@ -46,6 +56,13 @@ add_executable(boip_fake_fujinet tests/adamnet/boip_fake_fujinet.c)
 target_include_directories(boip_fake_fujinet PRIVATE src)
 target_link_libraries(boip_fake_fujinet adamcore pthread)
 
+add_executable(debug_step_test tests/machine/debug_step_test.c)
+target_include_directories(debug_step_test PRIVATE src)
+target_link_libraries(debug_step_test adamcore)
+
 add_test(NAME harte COMMAND harte_runner ${CMAKE_SOURCE_DIR}/tests/data/harte-z80)
 add_test(NAME zexdoc COMMAND zex_runner ${CMAKE_SOURCE_DIR}/tests/data/zexdoc.com)
 add_test(NAME boip COMMAND boip_fake_fujinet)
+# Needs the (non-redistributable) system ROMs; skips when absent.
+add_test(NAME debug_step COMMAND debug_step_test ${CMAKE_SOURCE_DIR}/tests/data/roms)
+set_tests_properties(debug_step PROPERTIES SKIP_RETURN_CODE 77)

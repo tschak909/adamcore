@@ -36,11 +36,22 @@ typedef enum {
     ADAMCORE_MACHINE_CV   = 1  /* ColecoVision OS7 + cartridge; reset mode 1 */
 } adamcore_machine;
 
+#define ADAMCORE_OS7_ROM_SIZE 0x2000
+#define ADAMCORE_EOS_ROM_SIZE 0x2000
+#define ADAMCORE_WP_ROM_SIZE  0x8000
+
 typedef struct {
     const char *os7_rom_path; /* 8K ColecoVision OS-7 BIOS (required) */
     const char *eos_rom_path; /* 8K ADAM EOS (required for ADAM mode) */
     const char *wp_rom_path;  /* 32K SmartWriter (required for ADAM mode) */
     const char *cart_path;    /* optional cartridge image */
+
+    /* In-memory ROM images (exactly the ADAMCORE_*_ROM_SIZE bytes). When a
+     * pointer is set it is used and the corresponding path is ignored, so a
+     * host can embed the ROMs in its binary instead of shipping files. */
+    const uint8_t *os7_rom_data;
+    const uint8_t *eos_rom_data;
+    const uint8_t *wp_rom_data;
 
     adamcore_machine start_machine;
 

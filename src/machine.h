@@ -52,6 +52,28 @@ struct adamcore {
 
     uint64_t frame_start_cycles;
     unsigned long nmi_count;
+
+    /* Debugger support (adamcore_debug.h). A frame in progress under
+     * adamcore_debug_run keeps its cursor here so run_frame and debug_run
+     * can hand execution back and forth without losing a cycle. Zero cost
+     * when the debugger is unused: run_frame only tests dbg_in_frame. */
+    int dbg_in_frame;         /* 1 = partial frame outstanding */
+    int dbg_line;             /* current scanline 0..261 */
+    uint64_t dbg_line_target; /* cycle target ending the current line */
+    uint8_t bp_map[0x2000];   /* 64K PC bitmap */
+    int bp_count;
+    int (*exec_hook)(void *ud, struct adamcore *c, uint16_t pc);
+    void *exec_hook_ud;
 };
+
+/* Internal helpers shared between machine.c's frame loop and debug.c's
+ * instruction-stepped equivalent. Both must produce bit-identical machine
+ * state; keeping the pieces in one place is what guarantees it. */
+void machine_apply_pending_reset(adamcore *c);
+void machine_vblank_nmi(adamcore *c);          /* line == TMS_ACTIVE_H */
+void machine_line_end(adamcore *c, int line);  /* render + adamnet scan */
+int  machine_frame_tail(adamcore *c);          /* psg publish, borders, diff */
+uint8_t machine_mem_read(adamcore *c, uint16_t a);  /* side-effect free */
+void machine_mem_write(adamcore *c, uint16_t a, uint8_t v);
 
 #endif
