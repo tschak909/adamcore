@@ -223,6 +223,17 @@ static void dump_bytes(const char *dir, const uint8_t *p, int n)
 }
 #endif
 
+/* Per-block delivery trace: logs the block number and a checksum of the
+ * 1024 bytes actually DMAed into guest RAM. Cheap to leave in (one line per
+ * block) and the only way to tell a silently-substituted block from a good
+ * one -- diff it against the mounted image to verify a read path end to end. */
+static int blk_trace(void)
+{
+    static int t = -1;
+    if (t < 0) t = getenv("ADAMCORE_BLK_TRACE") != NULL;
+    return t;
+}
+
 static void tx(struct boip *b, const uint8_t *pkt, int n)
 {
     if (wire_trace()) dump_bytes("TX", pkt, n);
@@ -300,27 +311,57 @@ static void send_blocknum(struct boip *b)
     b->t_last_poll = net_now_ms();
 }
 
-static void send_payload(struct boip *b, const uint8_t *data, uint16_t len)
+/* AdamNet DMA addresses intrinsic RAM with a 16-bit counter, so a transfer
+ * that runs past 0xFFFF wraps to 0x0000 on hardware. Honoring the wrap also
+ * keeps the copy inside mc->ram: a straight memcpy of up to 1024 bytes from a
+ * buffer address near the top of memory would run off the end of the array
+ * and into the struct members that follow it. */
+static void dma_to_ram(struct boip *b, uint16_t addr, const uint8_t *src,
+                       uint16_t n)
+{
+    uint8_t *m = b->mc->ram;
+    uint32_t first = 0x10000u - addr;
+    if (n <= first) {
+        memcpy(&m[addr], src, n);
+        return;
+    }
+    memcpy(&m[addr], src, first);
+    memcpy(&m[0], src + first, (size_t)n - first);
+}
+
+static void dma_from_ram(struct boip *b, uint16_t addr, uint8_t *dst,
+                         uint16_t n)
+{
+    const uint8_t *m = b->mc->ram;
+    uint32_t first = 0x10000u - addr;
+    if (n <= first) {
+        memcpy(dst, &m[addr], n);
+        return;
+    }
+    memcpy(dst, &m[addr], first);
+    memcpy(dst + first, &m[0], (size_t)n - first);
+}
+
+static void send_payload(struct boip *b, uint16_t addr, uint16_t len)
 {
     uint8_t pkt[1100];
     pkt[0] = (uint8_t)(0x60 | b->dev);
     pkt[1] = (uint8_t)(len >> 8);
     pkt[2] = (uint8_t)(len & 0xFF);
-    memcpy(&pkt[3], data, len);
-    pkt[3 + len] = xor_ck(data, len);
+    dma_from_ram(b, addr, &pkt[3], len);
+    pkt[3 + len] = xor_ck(&pkt[3], len);
     tx(b, pkt, 4 + len);
     b->t_last_poll = net_now_ms();
 }
 
 static void cwr_fire(struct boip *b)
 {
-    uint8_t *m = b->mc->ram;
     uint16_t len = dcb_buf_len(b);
     if (len == 0 || len > 1024) len = 1024;
     b->state = B_CWR_ACK;
     b->t_start = net_now_ms();
     b->rxlen = 0;
-    send_payload(b, &m[dcb_buf_addr(b)], len);
+    send_payload(b, dcb_buf_addr(b), len);
 }
 
 /* The node's post-response input-discard window (wait_for_idle) must
@@ -390,11 +431,28 @@ static void handle_data_resp(struct boip *b)
             tx1(b, 3);
             return;
         }
-        /* generic CLR is not retriable; log and accept */
-        fprintf(stderr, "adamcore boip: checksum mismatch dev %u\n", b->dev);
+        /* Retries exhausted -- or a char device, whose CLR is not retriable
+         * because the node clears its response buffer as it sends it.
+         * Either way the payload is provably not what the node transmitted,
+         * so fail the DCB rather than DMA it into the guest. Copying it in
+         * and still reporting ST_OK is what turns a recoverable link hiccup
+         * into silent corruption: EOS retries a block read that reports an
+         * error, but has no way to know that a "successful" one is garbage. */
+        fprintf(stderr, "adamcore boip: checksum mismatch dev %u (failing "
+                        "the DCB so the guest can retry)\n", b->dev);
+        complete(b, ST_TIMEOUT);
+        return;
     }
     if (max && n > max) n = max;
-    memcpy(&m[buf], &b->rx[3], n);
+    dma_to_ram(b, buf, &b->rx[3], n);
+    if (blk_trace() && b->state == B_BRD_DATA) {
+        uint32_t blk = (uint32_t)m[(uint16_t)(b->dcb + 5)] |
+                       ((uint32_t)m[(uint16_t)(b->dcb + 6)] << 8) |
+                       ((uint32_t)m[(uint16_t)(b->dcb + 7)] << 16) |
+                       ((uint32_t)m[(uint16_t)(b->dcb + 8)] << 24);
+        fprintf(stderr, "BLK dev=%u blk=%lu len=%u ck=%02X\n", b->dev,
+                (unsigned long)blk, n, xor_ck(&b->rx[3], n));
+    }
     /* Report the transferred length in the DCB buffer-length field:
      * EOS treats a completion without it as a failed transfer and
      * retries the whole operation (which also advances stateful
@@ -418,6 +476,52 @@ static void feed_rx(struct boip *b)
     }
 }
 
+/* Framed size of the node->master packet starting at rx[0]:
+ *   >0  the packet is complete and this many bytes long
+ *    0  a valid header, but the payload has not all arrived yet
+ *   -1  rx[0] cannot begin any packet
+ * Every response type is self-delimiting, which is what makes it possible to
+ * discard a stray response whole instead of byte by byte. */
+static int packet_len(const struct boip *b)
+{
+    switch (b->rx[0] >> 4) {
+    case 0x8: return b->rxlen >= 6 ? 6 : 0; /* STATUS: hdr + 4 + ck */
+    case 0x9: return 1;                     /* ACK */
+    case 0xC: return 1;                     /* NAK */
+    case 0xB: {                             /* DATA: hdr + len16 + n + ck */
+        uint16_t len;
+        if (b->rxlen < 3) return 0;
+        len = (uint16_t)((b->rx[1] << 8) | b->rx[2]);
+        if (len > 1024) return -1; /* no real DATA header looks like this */
+        return b->rxlen >= 4 + len ? 4 + len : 0;
+    }
+    default: return -1;
+    }
+}
+
+/* Discard one response that cannot serve the current state.
+ *
+ * Dropping a single byte and re-examining -- the obvious thing, and what this
+ * used to do -- is unsafe once the stray is a 1024-byte block: every payload
+ * byte then gets tested as a packet header, and finding one that matches the
+ * exact header the current state is waiting for is near-certain over that many
+ * bytes (~99.97% for one specific type+device value). The master then "resyncs"
+ * onto the middle of a payload and hands the guest whatever bytes follow. A
+ * live trace showed exactly that: a stray block landed during B_BRD_RECEIVE and
+ * the master emitted its CLR 29 ms later, having locked onto a 0x94 inside the
+ * payload rather than a real ACK.
+ *
+ * Skipping the whole packet keeps a stray to a single discarded response, and a
+ * lone byte is dropped only when it cannot begin a packet at all. */
+static void drop_stray(struct boip *b)
+{
+    int n = packet_len(b);
+    if (n == 0) return; /* incomplete: wait for the rest before skipping */
+    if (n < 0) n = 1;   /* genuine garbage byte */
+    b->rxlen -= n;
+    memmove(b->rx, b->rx + n, (size_t)b->rxlen);
+}
+
 static void advance(struct boip *b)
 {
     uint8_t t;
@@ -427,12 +531,29 @@ static void advance(struct boip *b)
     feed_rx(b);
     if (b->fd < 0) return;
 
+    /* Deadline enforcement has to happen here as well as in the silence
+     * handling below: waiting for the rest of a packet returns early, so a
+     * response that is truncated (or a stray whose framing never completes)
+     * would otherwise hold the transaction open forever -- the silence path
+     * is only reached with an empty rx buffer. */
+    if (b->rxlen > 0) {
+        if (b->state == B_CWR_PURGE_RX || b->state == B_CWR_PURGE_DATA) {
+            if (now - b->t_start > PURGE_TIMEOUT_MS) {
+                cwr_send_now(b);
+                return;
+            }
+        } else if (b->state != B_CWR_GAP && now - b->t_start > TIMEOUT_MS) {
+            complete(b, ST_TIMEOUT);
+            return;
+        }
+    }
+
     if (b->rxlen > 0) {
         t = (uint8_t)(b->rx[0] >> 4);
         if ((b->rx[0] & 0x0F) != b->dev) {
-            /* stray byte (e.g. a keep-alive ACK): not for this
-             * transaction's device; discard and re-examine */
-            memmove(b->rx, b->rx + 1, (size_t)--b->rxlen);
+            /* not for this transaction's device (e.g. a keep-alive ACK):
+             * discard the whole response and re-examine */
+            drop_stray(b);
             return;
         }
 
@@ -456,11 +577,10 @@ static void advance(struct boip *b)
                     b->state = B_BRD_RECEIVE;
                     tx1(b, 4); /* RECEIVE */
                 } else {
-                    uint8_t *m = b->mc->ram;
                     uint16_t len = dcb_buf_len(b);
                     if (len == 0 || len > 1024) len = 1024;
                     b->state = B_BWR_DATA_ACK;
-                    send_payload(b, &m[dcb_buf_addr(b)], len);
+                    send_payload(b, dcb_buf_addr(b), len);
                 }
                 return;
             }
@@ -538,8 +658,8 @@ static void advance(struct boip *b)
             break;
         }
 
-        /* type can never serve this state: drop it and re-examine */
-        memmove(b->rx, b->rx + 1, (size_t)--b->rxlen);
+        /* type can never serve this state: drop the whole response */
+        drop_stray(b);
         return;
     }
 

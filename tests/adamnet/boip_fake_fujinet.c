@@ -43,6 +43,10 @@ static int char9_recv_seen;   /* dev 9: swallow the first RECEIVE, as a
                                  node long-command wait_for_idle would */
 static int net10_body;        /* dev 10: a one-shot protocol body that a
                                  RECEIVE probe would fetch/consume */
+static int stray_before_ack;  /* dev 4: emit one unsolicited extra block just
+                                 before the block-number ACK, as a node that
+                                 served a re-polled CLR twice leaves behind */
+static int corrupt_all_data;  /* dev 4: every DATA carries a bad checksum */
 
 static uint8_t xck(const uint8_t *p, int n)
 {
@@ -186,6 +190,21 @@ static void *peer_thread(void *arg)
                                                ((uint32_t)pay[2] << 16) |
                                                ((uint32_t)pay[3] << 24));
                     have_pending = 1;
+                    if (stray_before_ack) {
+                        /* An unsolicited, well-formed block landing while the
+                         * master waits for this ACK: what a node that answered
+                         * a re-polled CLR twice leaves on the wire. Carries a
+                         * *different* block so a master that resyncs into the
+                         * payload delivers detectably wrong data. */
+                        static uint8_t s[1028];
+                        stray_before_ack = 0;
+                        s[0] = (uint8_t)(0xB0 | dev);
+                        s[1] = 0x04;
+                        s[2] = 0x00;
+                        memcpy(&s[3], disk[(pending_block + 1) & 3], 1024);
+                        s[1027] = xck(&s[3], 1024);
+                        peer_send(s, 1028);
+                    }
                 } else if (dev == 4 && len == 1024 && have_pending) {
                     memcpy(disk[pending_block & 3], pay, 1024);
                     have_pending = 0;
@@ -229,6 +248,8 @@ static void *peer_thread(void *arg)
                         r[1027] ^= 0xFF;
                         corrupt_next_data = 0;
                     }
+                    if (corrupt_all_data)
+                        r[1027] ^= 0xFF;
                     peer_send(r, 1028);
                 } else {
                     uint8_t nak = (uint8_t)(0xC0 | dev);
@@ -303,11 +324,17 @@ int main(void)
     adamcore_config cfg;
     pthread_t th;
     uint8_t *m;
-    int i;
+    int i, j;
 
-    /* canned disk content */
+    /* Canned disk content. Deliberately varied rather than a constant fill:
+     * a stray block only misleads a byte-at-a-time resync if its payload
+     * contains bytes that look like response headers (0x94 ACK / 0xB4 DATA /
+     * 0xC4 NAK for device 4), which real disk data does and 0xA0 fill does
+     * not. Every block below contains all three. */
     for (i = 0; i < 4; i++)
-        memset(disk[i], 0xA0 + i, sizeof(disk[i]));
+        for (j = 0; j < 1024; j++)
+            disk[i][j] = (uint8_t)((i * 7919 + j * 31 + (j >> 3) * 17) ^
+                                   (j * j));
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.start_machine = ADAMCORE_MACHINE_CV; /* no ROLL call needed */
@@ -345,13 +372,13 @@ int main(void)
     /* 2. block read */
     post_dcb(4, 4, 0x4000, 1024, 2);
     check("block read completes 0x80", wait_done(2000) == 0x80);
-    check("block read data", m[0x4000] == 0xA2 && m[0x4000 + 1023] == 0xA2);
+    check("block read data", memcmp(&m[0x4000], disk[2], 1024) == 0);
 
     /* 3. block read with silent seek stall */
     stall_receive_ms = 120;
     post_dcb(4, 4, 0x4000, 1024, 1);
     check("stalled read completes 0x80", wait_done(3000) == 0x80);
-    check("stalled read data", m[0x4000] == 0xA1);
+    check("stalled read data", memcmp(&m[0x4000], disk[1], 1024) == 0);
 
     /* 3b. block read whose CLR the node discarded (long TNFS read ->
      *     wait_for_idle): the master must re-poll CLR and still complete
@@ -360,13 +387,13 @@ int main(void)
     clr_discard_first = 1;
     post_dcb(4, 4, 0x4000, 1024, 0);
     check("clr-discard read completes 0x80", wait_done(1500) == 0x80);
-    check("clr-discard read data", m[0x4000] == 0xA0 && m[0x4000 + 1023] == 0xA0);
+    check("clr-discard read data", memcmp(&m[0x4000], disk[0], 1024) == 0);
 
     /* 4. CLR retry on corrupted checksum */
     corrupt_next_data = 1;
     post_dcb(4, 4, 0x4000, 1024, 3);
     check("ck-retry read completes 0x80", wait_done(3000) == 0x80);
-    check("ck-retry read data", m[0x4000] == 0xA3);
+    check("ck-retry read data", memcmp(&m[0x4000], disk[3], 1024) == 0);
 
     /* 5. block write round-trip */
     memset(&m[0x4400], 0x5A, 1024);
@@ -407,6 +434,50 @@ int main(void)
     check("net read after write keeps body 0x80", wait_done(1000) == 0x80);
     check("net read body intact",
           m[0x4A00] == 0xD5 && m[0x4A00 + 7] == 0xD5);
+
+    /* 10. A stray but perfectly well-formed block arriving mid-transaction
+     *     must be discarded as ONE packet. Scanning it byte by byte instead
+     *     finds a byte matching the header the master is waiting for almost
+     *     every time (1024 payload bytes, ~99.97% for one type+device), so the
+     *     master resyncs into the middle of the payload and hands the guest
+     *     whatever follows -- silent read corruption. */
+    stray_before_ack = 1;
+    post_dcb(4, 4, 0x4000, 1024, 1);
+    {
+        uint64_t t0 = net_now_ms();
+        uint8_t st = wait_done(2000);
+        uint64_t dt = net_now_ms() - t0;
+        check("stray-block read completes 0x80", st == 0x80);
+        check("stray-block read data", memcmp(&m[0x4000], disk[1], 1024) == 0);
+        /* Skipping the stray whole costs one poll; rescanning it byte by byte
+         * costs one poll per byte, which is ~150 ms for a 1028-byte block and
+         * is the observable signature of the unsafe resync. */
+        check("stray block skipped as one packet", dt < 120);
+        if (dt >= 120)
+            printf("    (stray read took %llu ms)\n", (unsigned long long)dt);
+    }
+    post_dcb(4, 4, 0x4000, 1024, 3);
+    check("read after stray completes 0x80", wait_done(2000) == 0x80);
+    check("read after stray data", memcmp(&m[0x4000], disk[3], 1024) == 0);
+
+    /* 11. A DATA whose checksum never verifies must FAIL the DCB rather than
+     *     be delivered as success. EOS retries a block read that reports an
+     *     error; it cannot tell that an ST_OK one is garbage, so accepting a
+     *     bad payload is exactly how a link hiccup becomes corrupt graphics. */
+    corrupt_all_data = 1;
+    memset(&m[0x4000], 0xEE, 1024);
+    post_dcb(4, 4, 0x4000, 1024, 1);
+    {
+        uint8_t st = wait_done(3000);
+        check("bad-checksum read does not report success", st != 0x80);
+        check("bad-checksum read leaves the buffer untouched",
+              m[0x4000] == 0xEE && m[0x4000 + 1023] == 0xEE);
+    }
+    corrupt_all_data = 0;
+    post_dcb(4, 4, 0x4000, 1024, 3);
+    check("read after checksum failure recovers", wait_done(2000) == 0x80);
+    check("read after checksum failure data",
+          memcmp(&m[0x4000], disk[3], 1024) == 0);
 
     printf("boip_fake_fujinet: %s\n", failures ? "FAILURES" : "all ok");
     adamcore_destroy(C);
