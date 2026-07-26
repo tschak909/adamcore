@@ -99,6 +99,14 @@ struct boip {
     uint8_t rx[1100];
     int rxlen;
 
+    /* Block-device head position, one entry per AdamNet address. A drive
+     * answers the first read of a block it is not already positioned on
+     * with "busy" and serves the data only when the guest asks again; see
+     * block_read_busy(). Index is the device address, so interleaved reads
+     * across drives 4..8 cannot cancel each other's staged block. */
+    uint32_t seek_block[16];
+    uint8_t seek_staged[16];
+
     /* char-device read backoff so an empty device isn't hammered */
     uint16_t last_crd_dcb;
     uint64_t last_crd_nak_ms;
@@ -173,6 +181,8 @@ void boip_bus_reset(struct boip *b)
     if (!b || b->fd < 0) return;
     b->state = B_IDLE;
     b->rxlen = 0;
+    /* every drive re-positions after a bus reset */
+    memset(b->seek_staged, 0, sizeof(b->seek_staged));
     for (i = 0; i < sizeof(devs); i++) {
         uint8_t pkt = devs[i]; /* MN_RESET = type 0 -> the address byte */
         if (net_write(b->fd, &pkt, 1) < 0) {
@@ -291,6 +301,46 @@ static uint16_t dcb_buf_len(struct boip *b)
     uint8_t *m = b->mc->ram;
     return (uint16_t)(m[(uint16_t)(b->dcb + 3)] |
                       (m[(uint16_t)(b->dcb + 4)] << 8));
+}
+
+/* 32-bit block number, little-endian at DCB+5 (the same field send_blocknum
+ * puts on the wire). */
+static uint32_t dcb_block(struct boip *b)
+{
+    uint8_t *m = b->mc->ram;
+    return (uint32_t)m[(uint16_t)(b->dcb + 5)] |
+           ((uint32_t)m[(uint16_t)(b->dcb + 6)] << 8) |
+           ((uint32_t)m[(uint16_t)(b->dcb + 7)] << 16) |
+           ((uint32_t)m[(uint16_t)(b->dcb + 8)] << 24);
+}
+
+/* A block drive does not answer a read immediately: it reports "busy" while
+ * it positions on the block, and the guest reads the DCB again to collect the
+ * data. Serving the first request outright compresses that two-step exchange
+ * into one, and a loader written around it takes a different path -- Donkey
+ * Kong Super Game stops before it programs Graphics II, so its play screen
+ * renders in Graphics I with OS7's default colour table.
+ *
+ * Returns 1 when the request must be answered "busy" (the DCB is completed
+ * here), 0 when the drive is on the block and the read may proceed.
+ *
+ * No artificial delay is added: the BoIP round trip to the node already
+ * supplies real latency, so the missing piece is the extra exchange, not
+ * more waiting. ADAMEm holds busy for DiskSpeed ms on top, which is worth
+ * revisiting only if a title turns out to need the dwell rather than the
+ * handshake. */
+static int block_read_busy(struct boip *b)
+{
+    uint32_t blk = dcb_block(b);
+    uint8_t dev = (uint8_t)(b->dev & 0x0F);
+
+    if (b->seek_staged[dev] && b->seek_block[dev] == blk)
+        return 0; /* already positioned: serve it */
+
+    b->seek_staged[dev] = 1;
+    b->seek_block[dev] = blk;
+    complete(b, ST_TIMEOUT);
+    return 1;
 }
 
 static void send_blocknum(struct boip *b)
@@ -819,6 +869,10 @@ void boip_dispatch(struct boip *b, struct adamcore *mc, uint16_t d,
         break;
     case 3: /* write */
         if (is_block_dev(dev)) {
+            /* Writes transfer straight away -- only reads wait on the head.
+             * The write moves it, though, so drop the staged block: a read
+             * of it afterwards has to position again. */
+            b->seek_staged[dev & 0x0F] = 0;
             b->state = B_BWR_BLKNUM_ACK;
             send_blocknum(b);
         } else if (is_net_dev(dev)) {
@@ -839,6 +893,8 @@ void boip_dispatch(struct boip *b, struct adamcore *mc, uint16_t d,
         break;
     case 4: /* read */
         if (is_block_dev(dev)) {
+            if (block_read_busy(b))
+                return; /* drive still positioning; guest will ask again */
             b->state = B_BRD_BLKNUM_ACK;
             send_blocknum(b);
         } else {

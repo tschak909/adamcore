@@ -311,6 +311,22 @@ static uint8_t wait_done(int max_ms)
     return C->ram[dcb0];
 }
 
+/* A block read takes two DCB posts: the drive reports busy (0x9B) while it
+ * positions on the block, and the guest posts the DCB again to collect the
+ * data. EOS drives every block read that way, so the tests do too. Returns
+ * the status of the second post (or the first, if it was not a busy). */
+static uint8_t block_read(uint8_t dev, uint16_t buf, uint16_t len,
+                          uint32_t blk, int max_ms)
+{
+    uint8_t st;
+    post_dcb(dev, 4, buf, len, blk);
+    st = wait_done(max_ms);
+    if (st != 0x9B)
+        return st;
+    post_dcb(dev, 4, buf, len, blk);
+    return wait_done(max_ms);
+}
+
 static int failures;
 
 static void check(const char *name, int ok)
@@ -369,15 +385,29 @@ int main(void)
     check("status maxl 1024", m[dcb0 + 17] == 0x00 && m[dcb0 + 18] == 0x04);
     check("status devtype block", m[dcb0 + 19] == 1);
 
-    /* 2. block read */
+    /* 2. block read. The drive answers the first request for a block it is
+     *    not positioned on with 0x9B and serves the data on the repeat; a
+     *    loader that counts on that exchange (Donkey Kong Super Game) takes
+     *    a different path if the first request is answered outright. */
     post_dcb(4, 4, 0x4000, 1024, 2);
-    check("block read completes 0x80", wait_done(2000) == 0x80);
+    check("first read of a new block reports busy", wait_done(2000) == 0x9B);
+    post_dcb(4, 4, 0x4000, 1024, 2);
+    check("repeat read completes 0x80", wait_done(2000) == 0x80);
+    check("repeat read data", memcmp(&m[0x4000], disk[2], 1024) == 0);
+
+    /* the same block again is already under the head: served at once */
+    memset(&m[0x4000], 0, 1024);
+    post_dcb(4, 4, 0x4000, 1024, 2);
+    check("re-read of the staged block completes 0x80",
+          wait_done(2000) == 0x80);
+    check("block read completes 0x80",
+          block_read(4, 0x4000, 1024, 2, 2000) == 0x80);
     check("block read data", memcmp(&m[0x4000], disk[2], 1024) == 0);
 
     /* 3. block read with silent seek stall */
     stall_receive_ms = 120;
-    post_dcb(4, 4, 0x4000, 1024, 1);
-    check("stalled read completes 0x80", wait_done(3000) == 0x80);
+    check("stalled read completes 0x80",
+          block_read(4, 0x4000, 1024, 1, 3000) == 0x80);
     check("stalled read data", memcmp(&m[0x4000], disk[1], 1024) == 0);
 
     /* 3b. block read whose CLR the node discarded (long TNFS read ->
@@ -385,14 +415,14 @@ int main(void)
      *     promptly. Without the B_BRD_DATA re-poll it stalls to TIMEOUT_MS
      *     and the read fails/returns late -- the DKJr-over-TNFS corruption. */
     clr_discard_first = 1;
-    post_dcb(4, 4, 0x4000, 1024, 0);
-    check("clr-discard read completes 0x80", wait_done(1500) == 0x80);
+    check("clr-discard read completes 0x80",
+          block_read(4, 0x4000, 1024, 0, 1500) == 0x80);
     check("clr-discard read data", memcmp(&m[0x4000], disk[0], 1024) == 0);
 
     /* 4. CLR retry on corrupted checksum */
     corrupt_next_data = 1;
-    post_dcb(4, 4, 0x4000, 1024, 3);
-    check("ck-retry read completes 0x80", wait_done(3000) == 0x80);
+    check("ck-retry read completes 0x80",
+          block_read(4, 0x4000, 1024, 3, 3000) == 0x80);
     check("ck-retry read data", memcmp(&m[0x4000], disk[3], 1024) == 0);
 
     /* 5. block write round-trip */
@@ -442,10 +472,16 @@ int main(void)
      *     master resyncs into the middle of the payload and hands the guest
      *     whatever follows -- silent read corruption. */
     stray_before_ack = 1;
-    post_dcb(4, 4, 0x4000, 1024, 1);
     {
-        uint64_t t0 = net_now_ms();
-        uint8_t st = wait_done(2000);
+        uint64_t t0;
+        uint8_t st;
+        /* position first, so the timing below measures only the exchange
+         * that meets the stray, not the drive's busy round trip */
+        post_dcb(4, 4, 0x4000, 1024, 1);
+        wait_done(2000);
+        t0 = net_now_ms();
+        post_dcb(4, 4, 0x4000, 1024, 1);
+        st = wait_done(2000);
         uint64_t dt = net_now_ms() - t0;
         check("stray-block read completes 0x80", st == 0x80);
         check("stray-block read data", memcmp(&m[0x4000], disk[1], 1024) == 0);
@@ -456,8 +492,8 @@ int main(void)
         if (dt >= 120)
             printf("    (stray read took %llu ms)\n", (unsigned long long)dt);
     }
-    post_dcb(4, 4, 0x4000, 1024, 3);
-    check("read after stray completes 0x80", wait_done(2000) == 0x80);
+    check("read after stray completes 0x80",
+          block_read(4, 0x4000, 1024, 3, 2000) == 0x80);
     check("read after stray data", memcmp(&m[0x4000], disk[3], 1024) == 0);
 
     /* 11. A DATA whose checksum never verifies must FAIL the DCB rather than
@@ -466,16 +502,15 @@ int main(void)
      *     bad payload is exactly how a link hiccup becomes corrupt graphics. */
     corrupt_all_data = 1;
     memset(&m[0x4000], 0xEE, 1024);
-    post_dcb(4, 4, 0x4000, 1024, 1);
     {
-        uint8_t st = wait_done(3000);
+        uint8_t st = block_read(4, 0x4000, 1024, 1, 3000);
         check("bad-checksum read does not report success", st != 0x80);
         check("bad-checksum read leaves the buffer untouched",
               m[0x4000] == 0xEE && m[0x4000 + 1023] == 0xEE);
     }
     corrupt_all_data = 0;
-    post_dcb(4, 4, 0x4000, 1024, 3);
-    check("read after checksum failure recovers", wait_done(2000) == 0x80);
+    check("read after checksum failure recovers",
+          block_read(4, 0x4000, 1024, 3, 2000) == 0x80);
     check("read after checksum failure data",
           memcmp(&m[0x4000], disk[3], 1024) == 0);
 
