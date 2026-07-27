@@ -67,6 +67,14 @@ enum {
      * always lands first, short enough to still recover a genuinely dropped
      * CLR well before TIMEOUT_MS. */
     BRD_CLR_REPOLL_MS = 60,
+    /* The block-number SEND can be discarded too (see the re-poll in
+     * advance()). Its ACK is only an acknowledgement of command receipt, not
+     * of any work, so it comes back in well under a millisecond; a cadence
+     * this long therefore only ever fires on a SEND that is genuinely gone,
+     * never on one whose ACK is merely in flight. That margin matters,
+     * because a duplicate ACK is not harmless here -- see the comment at the
+     * re-poll for why, and why the CLR re-poll now recovers from it. */
+    BRD_BLKNUM_REPOLL_MS = 250,
     /* After serving a response FujiNet's bus loop discards its input
      * FIFO (wait_for_idle); a command sent back-to-back lands in that
      * window and is silently eaten. The real bus's turnaround time
@@ -765,12 +773,41 @@ static void advance(struct boip *b)
      * TNFS) loading a garbage VDP script and corrupting the display. Re-issuing
      * CLR is idempotent: the node's block buffer persists, so it just re-sends
      * the same 1024 bytes. Only fires on true silence (a slow-but-arriving DATA
-     * leaves rx bytes buffered, so no spurious re-poll mid-transfer).
-     * (The block-number SEND is not re-polled: it is not preceded by a long
-     * command, so it is never discarded, and re-sending it could let a stray
-     * duplicate ACK be mistaken for the following RECEIVE ACK.) */
+     * leaves rx bytes buffered, so no spurious re-poll mid-transfer). */
     if (b->state == B_BRD_DATA && now - b->t_last_poll >= BRD_CLR_REPOLL_MS)
         tx1(b, 3); /* re-send CLR */
+
+    /* The block-number SEND is discarded sometimes as well. This was assumed
+     * not to happen -- it is not preceded by a long command -- but a traced
+     * CONFIG boot from local storage shows otherwise:
+     *
+     *   [...345137] TX 1: 14        STATUS
+     *   [...345137] RX 6: 84 ...    status response
+     *   [...345154] TX 9: 64 ... 1D SEND block 29   <- no answer, ever
+     *   [...350170] TX 9: 64 ... 1D SEND block 29   <- 5016 ms later, retried
+     *               BLOCK: 29                       <- node logs it only now
+     *
+     * The node had just served the STATUS response, and its post-response
+     * wait_for_idle()->discardInput() swallowed the SEND that followed 17 ms
+     * later. Without a re-poll the transaction sat until TIMEOUT_MS and the
+     * guest saw a five-second freeze mid-boot.
+     *
+     * Re-sending is idempotent for the node -- it just sets the target block
+     * again -- but it is not free for us: if the first SEND was merely slow
+     * rather than lost, both are ACKed, and the surplus ACK arrives while we
+     * are in B_BRD_RECEIVE, where an ACK means "data ready" and advances us
+     * to CLR early. That is why the cadence is generous (an ACK for a command
+     * that does no work returns in well under a millisecond, so 250 ms means
+     * lost, not slow), and why this is safer now than it once was: a
+     * premature CLR is answered with silence and the CLR re-poll above
+     * recovers, where before it would have hung.
+     *
+     * Read path only. The same hazard exists for a block write, but no trace
+     * has shown it, and a duplicate ACK there would desynchronise the payload
+     * SEND that follows -- a worse failure than the stall it would prevent. */
+    if (b->state == B_BRD_BLKNUM_ACK &&
+        now - b->t_last_poll >= BRD_BLKNUM_REPOLL_MS)
+        send_blocknum(b);
 }
 
 /* Pump the current transaction to completion in real wall-clock time.
