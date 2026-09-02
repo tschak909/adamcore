@@ -72,6 +72,32 @@ int net_read(int fd, void *buf, int n)
     return (WSAGetLastError() == WSAEWOULDBLOCK) ? 0 : -1;
 }
 
+/* select() rather than a polled sleep -- see the POSIX twin for why.
+ * Winsock ignores the nfds argument but still wants a sane value. */
+int net_wait_readable(int fd, int timeout_ms)
+{
+    fd_set rfds;
+    struct timeval tv, *ptv = NULL;
+    int r;
+
+    if (fd < 0) return -1;
+    FD_ZERO(&rfds);
+    FD_SET((SOCKET)fd, &rfds);
+    if (timeout_ms >= 0) {
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        ptv = &tv;
+    }
+    r = select(fd + 1, &rfds, NULL, NULL, ptv);
+    if (r == SOCKET_ERROR) return -1;
+    return r > 0 ? 1 : 0;
+}
+
+void net_sleep_ms(int ms)
+{
+    if (ms > 0) Sleep((DWORD)ms);
+}
+
 int net_write(int fd, const void *buf, int n)
 {
     /* Loopback with TCP_NODELAY: send the packet in one call so the peer

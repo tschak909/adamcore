@@ -31,6 +31,7 @@
 #include "adamnet.h"
 #include "boip.h"
 #include "machine.h"
+#include "net.h"
 
 enum {
     PCB_DEFAULT = 0xFEC0,
@@ -136,6 +137,15 @@ void adamnet_shutdown(adamnet *an)
     }
 }
 
+/* Cached: adamnet_scan runs per scanline, so a getenv() per DCB here is
+ * ~15k calls a second. */
+static int an_trace(void)
+{
+    static int t = -1;
+    if (t < 0) t = getenv("ADAMCORE_AN_TRACE") != NULL;
+    return t;
+}
+
 void adamnet_scan(adamnet *an)
 {
     uint8_t *m;
@@ -188,14 +198,15 @@ void adamnet_scan(adamnet *an)
         if (dcmd < CMD_STATUS || dcmd > CMD_READ)
             continue;
 
-        if (getenv("ADAMCORE_AN_TRACE")) {
+        if (an_trace()) {
             static uint32_t last_tag;
             uint32_t tag = ((uint32_t)d << 8) | (dev << 4) | dcmd |
                            ((uint32_t)m[(uint16_t)(d + 5)] << 16);
             if (tag != last_tag) {
                 fprintf(stderr,
-                        "AN: dcb=%04X dev=%X cmd=%d len=%u blk=%u buf=%04X\n",
-                        d, dev, dcmd,
+                        "[%8llu] AN: dcb=%04X dev=%X cmd=%d len=%u blk=%u "
+                        "buf=%04X\n",
+                        (unsigned long long)net_now_ms(), d, dev, dcmd,
                         m[(uint16_t)(d + 3)] | (m[(uint16_t)(d + 4)] << 8),
                         m[(uint16_t)(d + 5)] | (m[(uint16_t)(d + 6)] << 8),
                         m[(uint16_t)(d + 1)] | (m[(uint16_t)(d + 2)] << 8));

@@ -12,6 +12,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -58,6 +59,41 @@ int net_read(int fd, void *buf, int n)
     if (r > 0) return (int)r;
     if (r == 0) return -1; /* peer closed */
     return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+}
+
+/* select() rather than a polled sleep: the reply to a BoIP command lands on
+ * loopback in microseconds, so waking on the socket instead of on a fixed
+ * grid is what lets a transaction retire inside the frame that issued it
+ * (see boip_settle). Costs no CPU while waiting. */
+int net_wait_readable(int fd, int timeout_ms)
+{
+    fd_set rfds;
+    struct timeval tv, *ptv = NULL;
+    int r;
+
+    if (fd < 0) return -1;
+    for (;;) {
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        if (timeout_ms >= 0) {
+            tv.tv_sec = timeout_ms / 1000;
+            tv.tv_usec = (timeout_ms % 1000) * 1000;
+            ptv = &tv;
+        }
+        r = select(fd + 1, &rfds, NULL, NULL, ptv);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) return -1;
+        return r > 0 ? 1 : 0;
+    }
+}
+
+void net_sleep_ms(int ms)
+{
+    struct timespec ts;
+    if (ms <= 0) return;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
 }
 
 int net_write(int fd, const void *buf, int n)

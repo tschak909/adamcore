@@ -13,8 +13,16 @@
  *     seek stall) / CLR / 1024-byte DATA with checksum
  *   - CLR retry on a corrupted first DATA (checksum mismatch)
  *   - block write: two SENDs, data committed
- *   - char read NAK -> bounded retries -> 0x8C completion
+ *   - char read with nothing staged -> bounded retries -> 0x8C completion
+ *   - char command/response round trip (the CONFIG readdir shape), timed
  *   - absent device -> 0x9B timeout
+ *
+ * The char device models FujiNet's actual answers, which are not symmetric:
+ * CONTROL.RECEIVE is ACKed whether or not a reply is staged (adamFuji
+ * inherits virtualDevice::adamnet_control_receive), and a CONTROL.CLR with
+ * nothing staged is answered with SILENCE (sendResponsePacket returns early).
+ * A double that NAKed either one -- as this one used to -- cannot reproduce
+ * the stall those two behaviours caused.
  */
 
 #include <pthread.h>
@@ -47,6 +55,10 @@ static int stray_before_ack;  /* dev 4: emit one unsolicited extra block just
                                  before the block-number ACK, as a node that
                                  served a re-polled CLR twice leaves behind */
 static int corrupt_all_data;  /* dev 4: every DATA carries a bad checksum */
+/* dev 15 (FUJINET): the node's _transaction_reply_encoded. A command SEND
+ * stages a reply (transaction_send); CLR delivers it and resets it. */
+static uint8_t fuji_reply[31];
+static int fuji_reply_staged;
 
 static uint8_t xck(const uint8_t *p, int n)
 {
@@ -208,6 +220,15 @@ static void *peer_thread(void *arg)
                 } else if (dev == 4 && len == 1024 && have_pending) {
                     memcpy(disk[pending_block & 3], pay, 1024);
                     have_pending = 0;
+                } else if (dev == 15) {
+                    /* transaction_send(): stage the reply, then ACK. Echo the
+                     * command byte so the test can prove which command the
+                     * response belongs to. */
+                    int k;
+                    fuji_reply[0] = len ? pay[0] : 0;
+                    for (k = 1; k < (int)sizeof(fuji_reply); k++)
+                        fuji_reply[k] = (uint8_t)(0x40 + k);
+                    fuji_reply_staged = 1;
                 }
                 peer_send(&ack, 1);
                 break;
@@ -224,8 +245,14 @@ static void *peer_thread(void *arg)
                     }
                     peer_send(&ack, 1);
                 } else {
-                    uint8_t nak = (uint8_t)(0xC0 | dev); /* char: no data */
-                    peer_send(&nak, 1);
+                    /* A char device ACKs whether or not it has anything
+                     * staged: _adamnet_dispatch falls through to
+                     * virtualDevice::adamnet_control_receive(), which sends a
+                     * bare ACK, and adamFuji does not override it. Answering
+                     * NAK here -- as this double used to -- is what hid the
+                     * 250 ms purge stall from the suite. */
+                    uint8_t ack = (uint8_t)(0x90 | dev);
+                    peer_send(&ack, 1);
                 }
                 break;
             }
@@ -251,9 +278,19 @@ static void *peer_thread(void *arg)
                     if (corrupt_all_data)
                         r[1027] ^= 0xFF;
                     peer_send(r, 1028);
+                } else if (dev == 15 && fuji_reply_staged) {
+                    uint8_t r[35];
+                    r[0] = (uint8_t)(0xB0 | dev);
+                    r[1] = 0x00;
+                    r[2] = (uint8_t)sizeof(fuji_reply);
+                    memcpy(&r[3], fuji_reply, sizeof(fuji_reply));
+                    r[3 + sizeof(fuji_reply)] = xck(fuji_reply,
+                                                    (int)sizeof(fuji_reply));
+                    peer_send(r, (int)sizeof(r));
+                    fuji_reply_staged = 0; /* sendResponsePacket() resets it */
                 } else {
-                    uint8_t nak = (uint8_t)(0xC0 | dev);
-                    peer_send(&nak, 1);
+                    /* sendResponsePacket() returns early with nothing staged:
+                     * total silence, not a NAK. */
                 }
                 break;
             }
@@ -432,9 +469,45 @@ int main(void)
     run_ms(50);
     check("block write committed", disk[2][0] == 0x5A && disk[2][1023] == 0x5A);
 
-    /* 6. char read with no data -> bounded retries -> 0x8C */
+    /* 6. char read with no data -> bounded retries -> 0x8C. The node ACKs
+     *    the RECEIVE and then goes silent on the CLR, so this only terminates
+     *    if the master treats that silence as "nothing yet" instead of
+     *    waiting out the 5 s transaction deadline. */
     post_dcb(15, 4, 0x4000, 1024, 0);
-    check("char read NAK completes 0x8C", wait_done(6000) == 0x8C);
+    check("char read with nothing staged completes 0x8C",
+          wait_done(6000) == 0x8C);
+
+    /* 6b. The CONFIG directory-entry shape: write a Fuji command, then read
+     *     its response. Both halves must retire promptly. This is the
+     *     regression guard for the purge probe -- with it in place the write
+     *     alone burned PURGE_TIMEOUT_MS (~250 ms) waiting out a CLR the node
+     *     answers with silence, which is the pause between directory entries
+     *     in CONFIG. It also guards the char settle: without it each round
+     *     trip costs a whole ~16.7 ms emulated frame. */
+    {
+        uint64_t t0;
+        uint8_t wst, rst;
+        int k, ok = 1;
+        m[0x4900] = 0xF6; /* FUJI_READ_DIR_ENTRY */
+        m[0x4901] = 0x1F; /* maxlen */
+        t0 = net_now_ms();
+        post_dcb(15, 3, 0x4900, 2, 0);
+        wst = wait_done(2000);
+        post_dcb(15, 4, 0x4A00, 31, 0);
+        rst = wait_done(2000);
+        {
+            uint64_t dt = net_now_ms() - t0;
+            check("fuji command write completes 0x80", wst == 0x80);
+            check("fuji response read completes 0x80", rst == 0x80);
+            check("fuji response echoes the command", m[0x4A00] == 0xF6);
+            for (k = 1; k < 31; k++)
+                if (m[0x4A00 + k] != (uint8_t)(0x40 + k)) ok = 0;
+            check("fuji response payload intact", ok);
+            check("fuji command+response retire promptly", dt < 50);
+            printf("    (command+response took %llu ms)\n",
+                   (unsigned long long)dt);
+        }
+    }
 
     /* 7. absent device -> timeout 0x9B */
     post_dcb(6, 1, 0, 0, 0);

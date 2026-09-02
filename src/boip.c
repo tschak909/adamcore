@@ -20,7 +20,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "boip.h"
 #include "machine.h"
@@ -41,14 +40,7 @@ enum {
     B_BWR_DATA_ACK,
     B_CRD_RECEIVE,
     B_CRD_DATA,
-    B_CWR_ACK,
-    /* purge of a stale unconsumed device response before a new command:
-     * an abandoned read (guest gave up / host stalled) leaves the node's
-     * prepared response pending; sending the next command without
-     * consuming it desynchronizes every following read (stale data). */
-    B_CWR_PURGE_RX,
-    B_CWR_PURGE_DATA,
-    B_CWR_GAP /* post-purge turnaround wait before the actual SEND */
+    B_CWR_ACK
 };
 
 enum {
@@ -80,9 +72,37 @@ enum {
      * window and is silently eaten. The real bus's turnaround time
      * makes this impossible on hardware; enforce an equivalent gap. */
     INTER_TX_GAP_MS = 4,
-    PURGE_TIMEOUT_MS = 250,
     CRD_RETRY_MS = 10, /* re-poll cadence for a char device that answered
                           with "nothing yet" (NAK or empty DATA) */
+    /* A char CLR can be eaten by the node's post-response
+     * wait_for_idle()->discardInput() exactly like the block one, so it is
+     * re-polled; unlike a block CLR it is not idempotent for the node
+     * (sendResponsePacket() resets the staged reply as it writes it), but a
+     * re-poll is still safe: either the first CLR was served -- in which case
+     * we have already left this state -- or the reply is still staged. */
+    CRD_CLR_REPOLL_MS = 3,
+    /* FujiNet answers a CLR with nothing staged with SILENCE, not a NAK
+     * (sendResponsePacket() returns early), and its RECEIVE ACKs
+     * unconditionally, so an ACK does not promise data. Only a timer can tell
+     * the two apart, and getting it wrong in the impatient direction loses
+     * data silently: the node resets its staged reply as it writes it, so a
+     * DATA that lands after we have given up is dropped as a stray and that
+     * directory entry is simply missing from the listing. Nothing is lost by
+     * waiting -- a real reply arrives in microseconds and retires the
+     * transaction at once, and an eaten CLR is recovered by the re-poll above
+     * within milliseconds -- so this is generous enough to cover the
+     * hundreds-of-ms process stalls the CRD_GIVEUP_MS note describes. It
+     * bounds only the genuinely-empty read, which the Fuji device does not
+     * produce in normal use (CONFIG only reads after writing a command). */
+    CRD_QUIET_MS = 250,
+    /* Settle budgets: how long boip_settle() may hold the Z80 waiting on the
+     * node. Block transfers are DMA-fast on hardware and guests fire them
+     * back to back, so they get a generous one. A char exchange is one or two
+     * loopback round trips (microseconds), so a budget well under a frame is
+     * ample -- and a node that is genuinely slow (a TNFS readdir) falls back
+     * to the async path rather than eating the frame. */
+    CHAR_SETTLE_MS = 12,
+    BLOCK_SETTLE_MS = 250,
     TIMEOUT_MS = 5000,
     /* Devices answer STATUS within ~200us on the real bus; a short
      * per-attempt timeout keeps the EOS 15-address roll-call fast when
@@ -123,6 +143,7 @@ struct boip {
     uint16_t crd_chain_dcb;
     uint64_t crd_chain_start;
 
+    uint64_t t_crd_data;  /* when the char-read CLR was first sent */
     uint64_t t_keepalive;
     uint64_t t_last_done; /* when the previous transaction resolved */
 
@@ -422,18 +443,20 @@ static void cwr_fire(struct boip *b)
     send_payload(b, dcb_buf_addr(b), len);
 }
 
-/* The node's post-response input-discard window (wait_for_idle) must
- * pass before the command goes out, or it eats the command. */
-static void cwr_send_now(struct boip *b)
-{
-    b->state = B_CWR_GAP;
-    b->t_start = net_now_ms();
-    b->rxlen = 0;
-}
-
 static int is_block_dev(uint8_t dev)
 {
     return dev >= 4 && dev <= 8;
+}
+
+static int is_net_dev(uint8_t dev);
+
+/* Transactions we retire synchronously (see the tail of boip_dispatch).
+ * Those are also the ones worth sleeping the turnaround gap out for, because
+ * for them the alternative is losing a whole emulated frame. */
+static int settles(uint8_t dev, uint8_t dcmd)
+{
+    if (dcmd != 3 && dcmd != 4) return 0;
+    return is_block_dev(dev) || !is_net_dev(dev);
 }
 
 /* Network devices (N1..N6) run a stateful protocol whose RECEIVE is not a
@@ -594,16 +617,9 @@ static void advance(struct boip *b)
      * response that is truncated (or a stray whose framing never completes)
      * would otherwise hold the transaction open forever -- the silence path
      * is only reached with an empty rx buffer. */
-    if (b->rxlen > 0) {
-        if (b->state == B_CWR_PURGE_RX || b->state == B_CWR_PURGE_DATA) {
-            if (now - b->t_start > PURGE_TIMEOUT_MS) {
-                cwr_send_now(b);
-                return;
-            }
-        } else if (b->state != B_CWR_GAP && now - b->t_start > TIMEOUT_MS) {
-            complete(b, ST_TIMEOUT);
-            return;
-        }
+    if (b->rxlen > 0 && now - b->t_start > TIMEOUT_MS) {
+        complete(b, ST_TIMEOUT);
+        return;
     }
 
     if (b->rxlen > 0) {
@@ -679,6 +695,7 @@ static void advance(struct boip *b)
                 b->rxlen = 0;
                 b->state = B_CRD_DATA;
                 b->clr_retries = 0;
+                b->t_crd_data = now;
                 tx1(b, 3); /* CLR */
                 return;
             }
@@ -692,26 +709,6 @@ static void advance(struct boip *b)
             if (t == 0x9) { complete(b, ST_OK); return; }
             if (t == 0xC) { complete(b, ST_TIMEOUT); return; }
             break;
-        case B_CWR_PURGE_RX:
-            if (t == 0x9) { /* stale response exists: drain it */
-                b->rxlen = 0;
-                b->state = B_CWR_PURGE_DATA;
-                tx1(b, 3); /* CLR */
-                return;
-            }
-            if (t == 0xC) { cwr_send_now(b); return; } /* nothing stale */
-            break;
-        case B_CWR_PURGE_DATA:
-            if (t == 0xB) {
-                uint16_t len;
-                if (b->rxlen < 3) return;
-                len = (uint16_t)((b->rx[1] << 8) | b->rx[2]);
-                if (len <= 1024 && b->rxlen < 4 + len) return;
-                cwr_send_now(b); /* stale data discarded */
-                return;
-            }
-            if (t == 0xC) { cwr_send_now(b); return; }
-            break;
         default:
             break;
         }
@@ -722,16 +719,6 @@ static void advance(struct boip *b)
     }
 
     /* silence handling */
-    if (b->state == B_CWR_GAP) {
-        if (now - b->t_start >= INTER_TX_GAP_MS)
-            cwr_fire(b);
-        return;
-    }
-    if (b->state == B_CWR_PURGE_RX || b->state == B_CWR_PURGE_DATA) {
-        if (now - b->t_start > PURGE_TIMEOUT_MS)
-            cwr_send_now(b);
-        return;
-    }
     if (b->state == B_STATUS_WAIT) {
         if (now - b->t_start > STATUS_TIMEOUT_MS) {
             /* the real master retries a quiet node before giving up;
@@ -776,6 +763,25 @@ static void advance(struct boip *b)
      * leaves rx bytes buffered, so no spurious re-poll mid-transfer). */
     if (b->state == B_BRD_DATA && now - b->t_last_poll >= BRD_CLR_REPOLL_MS)
         tx1(b, 3); /* re-send CLR */
+
+    /* The char CLR gets the same treatment, but its silence is ambiguous in a
+     * way the block one's is not. FujiNet's RECEIVE ACKs unconditionally when
+     * the device stages nothing (adamFuji inherits
+     * virtualDevice::adamnet_control_receive), so reaching this state does not
+     * prove a reply exists; and a CLR with nothing staged is answered with
+     * silence rather than a NAK (sendResponsePacket returns early). Waiting
+     * for the transaction deadline instead would turn every empty char read
+     * into a 5 s stall. So: re-poll a few times in case the node's
+     * wait_for_idle()->discardInput() ate the CLR, then treat continued
+     * silence as "nothing yet" -- the same outcome as an explicit NAK. */
+    if (b->state == B_CRD_DATA) {
+        if (now - b->t_crd_data >= CRD_QUIET_MS) {
+            crd_nothing_yet(b, now);
+            return;
+        }
+        if (now - b->t_last_poll >= CRD_CLR_REPOLL_MS)
+            tx1(b, 3); /* re-send CLR */
+    }
 
     /* The block-number SEND is discarded sometimes as well. This was assumed
      * not to happen -- it is not preceded by a long command -- but a traced
@@ -823,20 +829,30 @@ static void advance(struct boip *b)
  * busy (0x04) and EOS drops it; the missed block leaves a graphics/descriptor
  * region unloaded and the display corrupts (Donkey Kong Jr's cage tiles).
  *
- * Settling gives the peer real time between polls so a block transfer retires
+ * Settling gives the peer real time between polls so a transfer retires
  * within its frame, matching hardware latency. Bounded so a slow/absent peer
- * degrades to the old per-frame path instead of hanging. */
-static void boip_settle(struct boip *b)
+ * degrades to the old per-frame path instead of hanging.
+ *
+ * The wait is a select() on the socket rather than a fixed sleep, which is
+ * what ADAMEm's blocking an_recv() does and the reason its transactions cost
+ * microseconds: a loopback reply wakes us immediately instead of on a 0.15 ms
+ * grid, and nothing is burned while idle. It is still capped at the RECEIVE
+ * re-poll cadence so advance()'s timer-driven resyncs keep firing. */
+static void boip_settle(struct boip *b, int budget_ms)
 {
     uint64_t start = net_now_ms();
     while (b->state != B_IDLE && b->fd >= 0) {
-        struct timespec ts = { 0, 150000 }; /* 0.15 ms */
+        uint64_t elapsed;
+        int wait;
         advance(b);
         if (b->state == B_IDLE || b->fd < 0)
             break;
-        if (net_now_ms() - start > 250)
+        elapsed = net_now_ms() - start;
+        if (elapsed >= (uint64_t)budget_ms)
             break; /* safety cap: resume the async path next frame */
-        nanosleep(&ts, NULL);
+        wait = budget_ms - (int)elapsed;
+        if (wait > REPOLL_MS) wait = REPOLL_MS;
+        net_wait_readable(b->fd, wait);
     }
 }
 
@@ -881,10 +897,25 @@ void boip_poll(struct boip *b)
 void boip_dispatch(struct boip *b, struct adamcore *mc, uint16_t d,
                    uint8_t dcmd, uint8_t dev)
 {
+    uint64_t since;
+
     if (b->state != B_IDLE)
         return; /* one transaction at a time; this DCB stays pending */
-    if (net_now_ms() - b->t_last_done < INTER_TX_GAP_MS)
-        return; /* respect the node's post-response turnaround window */
+
+    /* Respect the node's post-response turnaround window. Sleeping the
+     * remainder out beats returning for anything we are about to settle: the
+     * DCB is re-offered on every scanline, but wall clock barely advances
+     * inside a frame's scan burst, so a return here does not cost the 4 ms
+     * that are left -- it costs the whole 16.7 ms frame. Measured on a CONFIG
+     * directory listing, that was one frame per entry, the read half of every
+     * command/response pair. Devices that stay on the async path are still
+     * simply deferred; they are not waiting on us. */
+    since = net_now_ms() - b->t_last_done;
+    if (since < INTER_TX_GAP_MS) {
+        if (!settles(dev, dcmd))
+            return;
+        net_sleep_ms((int)(INTER_TX_GAP_MS - since));
+    }
 
     b->mc = mc;
     b->dcb = d;
@@ -912,20 +943,33 @@ void boip_dispatch(struct boip *b, struct adamcore *mc, uint16_t d,
             b->seek_staged[dev & 0x0F] = 0;
             b->state = B_BWR_BLKNUM_ACK;
             send_blocknum(b);
-        } else if (is_net_dev(dev)) {
-            /* Never purge a network device: its RECEIVE triggers the lazy
-             * protocol read, so a purge probe fetches the response body and
-             * then throws it away. Observed as ISS hanging on "FETCHING
-             * DATA" -- the pre-CHANNEL_MODE purge drained the iss-now.json
-             * body (delivered as a 112-byte DATA packet) before the JSON
-             * parser could read it. Send the command directly; these devices
-             * don't accumulate the stale Fuji-style responses the purge
-             * (added for the mount-corruption workaround, whose real cause
-             * was the double-param(0) bug) was built for. */
-            cwr_send_now(b);
         } else {
-            b->state = B_CWR_PURGE_RX;
-            tx1(b, 4); /* RECEIVE: probe for a stale pending response */
+            /* Straight to the command, the way ADAMEm's AdamNet_CharWrite and
+             * the real EOS 6801 master do it.
+             *
+             * This used to be preceded by a CONTROL.RECEIVE "purge probe"
+             * looking for a stale unconsumed response. It could not work
+             * against FujiNet and cost a fixed ~250 ms on every single Fuji
+             * command -- the pause between directory entries in CONFIG.
+             * adamFuji does not override adamnet_control_receive(), so the
+             * node's base implementation ACKs the probe whether or not
+             * anything is staged; the master then read every ACK as "stale
+             * data, drain it", sent CLR, and got silence, because
+             * sendResponsePacket() returns early with nothing staged. The
+             * probe therefore always ran to PURGE_TIMEOUT_MS.
+             *
+             * Neither staleness channel it guarded needs it:
+             *   - staged on the node: transaction_send() overwrites
+             *     _transaction_reply_encoded on every command and only
+             *     resets it after transmission, so a new command replaces a
+             *     stale reply rather than queueing behind it;
+             *   - already on the wire: the feed_rx()/rxlen=0 below drops it,
+             *     and one arriving mid-transaction is discarded whole by
+             *     drop_stray().
+             * Network devices were already exempt (their RECEIVE drives the
+             * lazy protocol read, so probing it fetched and threw away the
+             * response body -- ISS hanging on "FETCHING DATA"). */
+            cwr_fire(b);
         }
         break;
     case 4: /* read */
@@ -954,10 +998,24 @@ void boip_dispatch(struct boip *b, struct adamcore *mc, uint16_t d,
         break;
     }
 
-    /* Block reads/writes are DMA-fast on real hardware; retire them within the
-     * frame so a guest that fires them back-to-back never sees a stale busy
-     * DCB. Char/network devices are intentionally lazy (their RECEIVE triggers
-     * work host-side) and must stay on the async path. */
-    if (is_block_dev(dev) && (dcmd == 3 || dcmd == 4) && b->state != B_IDLE)
-        boip_settle(b);
+    /* Retire the exchange inside the frame that issued it.
+     *
+     * Block reads/writes are DMA-fast on real hardware, so a guest that fires
+     * them back-to-back must never see a stale busy DCB. Char exchanges are
+     * one or two loopback round trips against a reply the node already has in
+     * hand, so they belong here too -- leaving them on the async path cost one
+     * whole 16.7 ms frame per round trip, which is most of what remained of
+     * the CONFIG directory pause once the purge probe was gone. ADAMEm draws
+     * the same line: char transactions are synchronous there, block reads are
+     * the ones it polls.
+     *
+     * Network devices stay async: their RECEIVE deliberately triggers
+     * host-side work (an HTTP GET), so the node can be legitimately silent for
+     * a long time and the Z80 must not wait on it. */
+    if (b->state == B_IDLE || (dcmd != 3 && dcmd != 4))
+        return;
+    if (is_block_dev(dev))
+        boip_settle(b, BLOCK_SETTLE_MS);
+    else if (!is_net_dev(dev))
+        boip_settle(b, CHAR_SETTLE_MS);
 }
