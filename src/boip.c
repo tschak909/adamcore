@@ -104,12 +104,28 @@ enum {
     CHAR_SETTLE_MS = 12,
     BLOCK_SETTLE_MS = 250,
     TIMEOUT_MS = 5000,
-    /* Devices answer STATUS within ~200us on the real bus; a short
-     * per-attempt timeout keeps the EOS 15-address roll-call fast when
-     * most addresses have no FujiNet device behind them, while the
-     * retries ride out host-side scheduling stalls. */
+    /* Devices answer STATUS within ~200us on the real bus, and a live FujiNet
+     * answers one over loopback inside the same millisecond. The generous
+     * budget below is not for them -- it rides out FujiNet's startup
+     * registration and host-side scheduling stalls, where a device that does
+     * exist has simply not answered yet. */
     STATUS_TIMEOUT_MS = 120,
-    STATUS_RETRIES = 5
+    STATUS_RETRIES = 5,
+    /* But paying that budget for an address nobody is behind is what made an
+     * EOS cold boot pause for seconds. EOS rolls-call 2..15 and FujiNet claims
+     * only some of them; each empty one cost 6 x ~133 ms (the per-attempt
+     * timeout, rounded up to the frame the async path checks it on), so a
+     * measured roll-call ran 4756 ms with six silent addresses.
+     *
+     * Silence is only ambiguous while the node might be stalled. If it
+     * answered a STATUS moments ago it is demonstrably alive and scheduled,
+     * so silence now means the address is empty -- a permanent fact worth
+     * only a short confirmation. The recency window is what makes this
+     * degrade safely: it spans a run of consecutive empty addresses (B..E in
+     * a stock chain) but lapses if the node really does go away, restoring
+     * the full budget. */
+    STATUS_HEALTHY_MS = 1000,
+    STATUS_TIMEOUT_SEEN_MS = 25
 };
 
 struct boip {
@@ -144,6 +160,7 @@ struct boip {
     uint64_t crd_chain_start;
 
     uint64_t t_crd_data;  /* when the char-read CLR was first sent */
+    uint64_t t_status_ok; /* when the node last answered a STATUS */
     uint64_t t_keepalive;
     uint64_t t_last_done; /* when the previous transaction resolved */
 
@@ -486,6 +503,7 @@ static void handle_status_resp(struct boip *b)
         uint8_t code = (uint8_t)(b->rx[4] & 0x0F);
         m[(uint16_t)(b->dcb + 20)] = (uint8_t)(code | (code << 4));
     }
+    b->t_status_ok = net_now_ms(); /* the node is alive and scheduled */
     complete(b, ST_OK);
 }
 
@@ -720,10 +738,15 @@ static void advance(struct boip *b)
 
     /* silence handling */
     if (b->state == B_STATUS_WAIT) {
-        if (now - b->t_start > STATUS_TIMEOUT_MS) {
+        /* A node that answered a STATUS this recently is not stalled, so
+         * silence from this address means nothing is behind it. */
+        int healthy = b->t_status_ok != 0 &&
+                      now - b->t_status_ok < STATUS_HEALTHY_MS;
+        uint64_t budget = healthy ? STATUS_TIMEOUT_SEEN_MS : STATUS_TIMEOUT_MS;
+        if (now - b->t_start > budget) {
             /* the real master retries a quiet node before giving up;
              * this also rides out FujiNet's startup registration */
-            if (b->status_retries++ < STATUS_RETRIES) {
+            if (!healthy && b->status_retries++ < STATUS_RETRIES) {
                 b->t_start = now;
                 b->rxlen = 0;
                 tx1(b, 1);
@@ -1012,10 +1035,10 @@ void boip_dispatch(struct boip *b, struct adamcore *mc, uint16_t d,
      * Network devices stay async: their RECEIVE deliberately triggers
      * host-side work (an HTTP GET), so the node can be legitimately silent for
      * a long time and the Z80 must not wait on it. */
-    if (b->state == B_IDLE || (dcmd != 3 && dcmd != 4))
+    if (b->state == B_IDLE || !settles(dev, dcmd))
         return;
     if (is_block_dev(dev))
         boip_settle(b, BLOCK_SETTLE_MS);
-    else if (!is_net_dev(dev))
+    else
         boip_settle(b, CHAR_SETTLE_MS);
 }

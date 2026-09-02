@@ -15,7 +15,7 @@
  *   - block write: two SENDs, data committed
  *   - char read with nothing staged -> bounded retries -> 0x8C completion
  *   - char command/response round trip (the CONFIG readdir shape), timed
- *   - absent device -> 0x9B timeout
+ *   - absent device -> 0x9B timeout, promptly once the node is known live
  *
  * The char device models FujiNet's actual answers, which are not symmetric:
  * CONTROL.RECEIVE is ACKed whether or not a reply is staged (adamFuji
@@ -512,6 +512,25 @@ int main(void)
     /* 7. absent device -> timeout 0x9B */
     post_dcb(6, 1, 0, 0, 0);
     check("absent device status 0x9B", wait_done(2000) == 0x9B);
+
+    /* 7b. ...and it must not cost the full first-contact budget once the node
+     *     has just proven it is alive. EOS rolls-call addresses 2..15 on every
+     *     cold boot and a stock FujiNet claims only some of them; charging
+     *     STATUS_RETRIES x STATUS_TIMEOUT_MS to each empty one made a measured
+     *     cold boot sit in the roll-call for 4.2 s after the RESET packets. */
+    post_dcb(4, 1, 0, 0, 0);
+    check("live status completes 0x80", wait_done(1000) == 0x80);
+    {
+        uint64_t t0 = net_now_ms();
+        uint8_t st;
+        uint64_t dt;
+        post_dcb(6, 1, 0, 0, 0);
+        st = wait_done(2000);
+        dt = net_now_ms() - t0;
+        check("absent address after a live status is 0x9B", st == 0x9B);
+        check("absent address resolves promptly", dt < 150);
+        printf("    (absent address took %llu ms)\n", (unsigned long long)dt);
+    }
 
     /* 8. char read whose first RECEIVE the node discarded (long command):
      *    the master must re-poll RECEIVE and still complete promptly. Without
