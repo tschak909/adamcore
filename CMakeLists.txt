@@ -10,27 +10,13 @@ endif()
 
 add_compile_options(-Wall -Wextra)
 
-# Sources grow milestone by milestone; see README.
-if(WIN32)
-  set(ADAMCORE_NET_SOURCE src/net_win32.c)
-else()
-  set(ADAMCORE_NET_SOURCE src/net_posix.c)
-endif()
+# The source list lives in adamcore-sources.cmake and is used from there by
+# this build AND by the hosts that stage these sources into their own tree, so
+# adding a file here cannot silently break their link.
+include(${CMAKE_CURRENT_LIST_DIR}/adamcore-sources.cmake)
+adamcore_sources(ADAMCORE_SOURCES ROOT "${CMAKE_CURRENT_LIST_DIR}")
 
-add_library(adamcore STATIC
-  src/z80.c
-  src/tms9928a.c
-  src/sn76489.c
-  src/ay8910.c
-  src/psg.c
-  src/machine.c
-  src/cart.c
-  src/adamnet.c
-  src/boip.c
-  ${ADAMCORE_NET_SOURCE}
-  src/palette.c
-  src/debug.c
-)
+add_library(adamcore STATIC ${ADAMCORE_SOURCES})
 target_include_directories(adamcore PUBLIC include PRIVATE src)
 set_property(TARGET adamcore PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(WIN32)

@@ -109,6 +109,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "-joystick")) cfg.joystick_mode = atoi(argv[++i]);
         else if (!strcmp(a, "-swapbuttons")) cfg.swap_buttons = atoi(argv[++i]);
         else if (!strcmp(a, "-keypad")) cfg.reverse_keypad = atoi(argv[++i]);
+        else if (!strcmp(a, "-sgm")) cfg.sgm = 1;
         else if (!strcmp(a, "--frames")) frames = atoi(argv[++i]);
         else if (!strcmp(a, "--ppm")) ppm = argv[++i];
         else if (!strcmp(a, "--ppm-every")) { ppm_every = atoi(argv[++i]); ppm_prefix = argv[++i]; }

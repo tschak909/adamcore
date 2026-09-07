@@ -15,13 +15,17 @@ app; a small Linux CLI runner lives in `cli/` for development and testing.
   validated against Tom Harte's SingleStepTests and ZEXDOC/ZEXALL
 - TI TMS9928A VDP (modes 0–3, sprites, 256×212 output incl. borders)
 - TI SN76489 PSG (pull-model resampling to the host audio rate)
+- Opcode Super Game Module: AY-3-8910 and the 24K RAM expansion, mixed on the
+  SN's timeline (ColecoVision only, off unless `cfg.sgm` is set)
+- A cartridge-device vtable (`adamcore_cart_ops`) for mappers and for the
+  FujiNet cartridge, whose mailbox is decoded out of cartridge reads
 - Coleco ADAM memory switcher and ColecoVision I/O map
 - ColecoVision cartridges
 - A high-level AdamNet master: local keyboard device, plus "Bus over IP" (BoIP)
   forwarding of storage/network devices over loopback TCP to a connected
   [FujiNet](https://fujinet.online/) (fujinet-pc built for the ADAM target)
 
-Out of scope (v1): local disk/tape images, printer, IDE, snapshots, SGM.
+Out of scope (v1): local disk/tape images, printer, IDE, snapshots.
 Storage is expected to be served by FujiNet over BoIP.
 
 ## Provenance
