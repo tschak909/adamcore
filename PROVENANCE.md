@@ -60,6 +60,24 @@ Hardware documentation:
 - Published Opcode Super Game Module documentation: ports $50-$53, the $7F
   bit-1 BIOS/RAM switch, the 24K expansion at $2000-$7FFF, and the AY clock
 
+Test material (behavioural, not source):
+
+- `super_game_module_test.rom` (Oscar Toledo G., 2013) -- a ColecoVision
+  program that probes the Super Game Module and reports what it finds. It is
+  a *test of the hardware*, run on this core the way it runs on a console;
+  reading what a diagnostic ROM asserts about a machine is learning about the
+  machine, not about any emulator. It confirms the base 1K and its mirror,
+  SGM detection through port $53, the 24K at $2000-$7FFF, the lower-8K
+  BIOS/RAM swap through port $7F, and the AY. This core reaches "TEST
+  COMPLETED!"; with the SGM absent it correctly reports "NO SUPER GAME
+  MODULE DETECTED".
+- CoolCV (Oscar Toledo G.) was used ONLY as a black-box A/B oracle: the same
+  test ROM run in it, the two screens compared. Its binary was not
+  disassembled and no part of its implementation was examined -- it is
+  closed-source, and deriving behaviour from another emulator is exactly what
+  the clean-room statement above excludes. Same use, and same limit, as is
+  already recorded for ADAMEm.
+
 Test material:
 
 - Tom Harte / SingleStepTests Z80 test vectors (MIT license) — fetched by
