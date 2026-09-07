@@ -56,7 +56,6 @@
  * plain banked-array decode and ignores the flag. */
 static uint8_t mem_read_at(adamcore *c, uint16_t a, int commit)
 {
-    (void)commit; /* consumed by the cartridge device; see adamcore_cart_ops */
     if (a < 0x8000) {
         switch (c->mem_ctrl & 3) {
         case 0:
@@ -74,6 +73,9 @@ static uint8_t mem_read_at(adamcore *c, uint16_t a, int commit)
     case 1: return 0xFF; /* expansion ROM socket, unpopulated */
     case 2: return c->xram[a];
     default:
+        if (c->cart_ops)
+            return c->cart_ops->read(c->cart_ops_ud, (uint16_t)(a - 0x8000),
+                                     commit);
         return c->cart_size > 0 ? c->cart[a - 0x8000] : 0xFF;
     }
 }
@@ -83,9 +85,11 @@ static uint8_t mem_read(void *ud, uint16_t a)
     return mem_read_at((adamcore *)ud, a, 1);
 }
 
-static void mem_write(void *ud, uint16_t a, uint8_t v)
+/* The bus write. `commit` carries the same meaning as in mem_read_at: 1 is
+ * the Z80, 0 is machine_mem_write() (adamcore_poke). Only the cartridge
+ * window looks at it -- a debugger memory edit must not switch a bank. */
+static void mem_write_at(adamcore *c, uint16_t a, uint8_t v, int commit)
 {
-    adamcore *c = ud;
     if (a < 0x8000) {
         switch (c->mem_ctrl & 3) {
         case 1: c->ram[a] = v; break;
@@ -98,8 +102,20 @@ static void mem_write(void *ud, uint16_t a, uint8_t v)
     switch ((c->mem_ctrl >> 2) & 3) {
     case 0: c->ram[a] = v; break;
     case 2: c->xram[a] = v; break;
-    default: break; /* ROM */
+    default:
+        /* A cartridge device sees writes; a plain image does not. Reached
+         * only from the Z80's bus -- machine_mem_write (adamcore_poke) stops
+         * short of here on purpose, so a debugger memory edit cannot switch a
+         * bank. */
+        if (c->cart_ops && commit)
+            c->cart_ops->write(c->cart_ops_ud, (uint16_t)(a - 0x8000), v);
+        break;
     }
+}
+
+static void mem_write(void *ud, uint16_t a, uint8_t v)
+{
+    mem_write_at((adamcore *)ud, a, v, 1);
 }
 
 /* ---- controllers ---------------------------------------------------------- */
@@ -204,6 +220,17 @@ static void machine_reset(adamcore *c, int mode)
         c->mem_ctrl = 0x00;
     }
     adamnet_reset(&c->an);
+
+    /* Deliberately NOT c->cart_ops->reset(). The cartridge edge connector
+     * carries no reset line -- neither the console's RESET button nor a
+     * mode switch reaches a cartridge, so on hardware it simply never sees
+     * one, and a device that reset itself here would be less accurate, not
+     * more. For the FujiNet cartridge it would also be a protocol bug: its
+     * client takes each transaction's sequence number from the value the
+     * cartridge last acknowledged, precisely so a client restart cannot
+     * replay a number the cartridge has already answered. Reset that and the
+     * first transaction after a reset gets silence, and the stale reply still
+     * sitting in the window reads as success. */
 }
 
 /* ---- ROM loading ---------------------------------------------------------- */
@@ -356,6 +383,24 @@ int machine_frame_tail(adamcore *c)
     return 0;
 }
 
+void adamcore_set_cart_ops(adamcore *c, const adamcore_cart_ops *ops, void *ud)
+{
+    c->cart_ops = ops;
+    c->cart_ops_ud = ud;
+    /* Power-on, not console reset: this is the moment the cartridge is
+     * plugged in. machine_reset() explains why it is the only one. */
+    if (ops && ops->reset)
+        ops->reset(ud);
+}
+
+int adamcore_cart_insert(adamcore *c, const uint8_t *image, uint32_t size)
+{
+    int n = cart_fill(image, size, c->cart);
+    if (n < 0) return -1;
+    c->cart_size = n;
+    return n;
+}
+
 uint8_t machine_mem_read(adamcore *c, uint16_t a)
 {
     return mem_read_at(c, a, 0); /* no device side effects; see mem_read_at */
@@ -363,7 +408,7 @@ uint8_t machine_mem_read(adamcore *c, uint16_t a)
 
 void machine_mem_write(adamcore *c, uint16_t a, uint8_t v)
 {
-    mem_write(c, a, v);
+    mem_write_at(c, a, v, 0); /* no device side effects; see mem_write_at */
 }
 
 int adamcore_run_frame(adamcore *c)

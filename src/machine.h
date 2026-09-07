@@ -35,6 +35,11 @@ struct adamcore {
     uint8_t cart[0x8000];
     int cart_size;
 
+    /* Optional cartridge device owning the $8000-$FFFF window; when set it
+     * supersedes cart[] entirely. See adamcore_cart_ops. */
+    const adamcore_cart_ops *cart_ops;
+    void *cart_ops_ud;
+
     uint8_t mem_ctrl; /* port 0x7F: D0-D1 lower bank, D2-D3 upper bank */
     uint8_t net_ctrl; /* port 0x3F: bit0 net reset, bit1 EOS ROM enable */
     int game_mode;    /* 1 after a mode-1 (ColecoVision) reset */

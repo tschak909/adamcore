@@ -64,6 +64,59 @@ typedef struct {
     int audio_rate;       /* host sample rate, e.g. 44100 */
 } adamcore_config;
 
+/* ---- cartridge devices ----------------------------------------------------
+ * A device on the $8000-$FFFF window, for cartridges that are more than a
+ * plain image: bank-switching mappers, and the FujiNet cartridge, whose
+ * mailbox is decoded out of read addresses in the top of the window.
+ *
+ * `off` is a CART OFFSET, 0x0000-0x7FFF, not a CPU address -- matching the
+ * convention the ColecoVision cartridge headers and mapper code use.
+ *
+ * read(commit)  commit = 1 is the Z80's bus cycle: fire hotspots, move banks.
+ *               commit = 0 is adamcore_peek / adamcore_peek_block, i.e. every
+ *               debugger memory view, disassembly line and trace entry. It
+ *               must return the byte with nothing observable changed. Getting
+ *               this wrong does not crash; it silently corrupts whatever the
+ *               device is doing, only while someone is looking at it.
+ *
+ * write()       Always a real bus cycle -- adamcore_poke does NOT reach here,
+ *               so a debugger memory edit cannot switch a bank. Note that the
+ *               real ColecoVision cartridge port has no /RD or /WR: its chip
+ *               selects are qualified by /MREQ and /RFSH only, so hardware
+ *               cannot tell a read from a write. A device modelling a mapper
+ *               should treat a write as an access too.
+ *
+ * reset()       POWER-ON ONLY. Called once from adamcore_set_cart_ops and
+ *               never from a console reset, because the cartridge edge
+ *               connector carries no reset line -- on hardware the cartridge
+ *               simply never sees one. For the FujiNet cartridge this is load
+ *               bearing: its client derives each transaction's sequence
+ *               number from the value the cartridge last acknowledged, so
+ *               that state has to survive a reset the client does not.
+ *               May be NULL. */
+typedef struct {
+    uint8_t (*read)(void *ud, uint16_t off, int commit);
+    void    (*write)(void *ud, uint16_t off, uint8_t v);
+    void    (*reset)(void *ud);
+} adamcore_cart_ops;
+
+/* Installs a cartridge device, superseding cfg.cart_path and
+ * adamcore_cart_insert entirely: the device owns the whole window. Calls
+ * ops->reset once. Pass ops = NULL to uninstall and go back to the plain
+ * image. */
+void adamcore_set_cart_ops(adamcore *c, const adamcore_cart_ops *ops, void *ud);
+
+/* Replaces the internally-served cartridge image mid-session -- what a host
+ * needs for "insert cartridge" without tearing the machine down. Images
+ * shorter than 32K are mirrored the way cfg.cart_path loading does; image =
+ * NULL or size = 0 ejects. Returns the stored size, or -1 if size > 32K.
+ *
+ * This is NOT how a FujiNet network boot swaps images: with cart ops
+ * installed the device owns its own window and this is inert. Nothing else is
+ * disturbed -- no CPU, VDP or PSG reset, no bank-register change, no cart-ops
+ * reset -- because a swap can land while the console is mid-instruction. */
+int adamcore_cart_insert(adamcore *c, const uint8_t *image, uint32_t size);
+
 /* Create loads the ROMs and, if configured, opens the BoIP listener.
  * Returns NULL on failure (missing/short ROM, socket error). */
 adamcore *adamcore_create(const adamcore_config *cfg);
