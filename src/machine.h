@@ -40,6 +40,14 @@ struct adamcore {
     const adamcore_cart_ops *cart_ops;
     void *cart_ops_ud;
 
+    uint8_t cv;       /* created as a ColecoVision (cfg.start_machine) */
+
+    /* Super Game Module, meaningful only when cv && cfg.sgm. Both clear at
+     * power-on and on a console reset: the SGM hangs off the expansion
+     * connector, which unlike the cartridge edge does carry /RESET. */
+    uint8_t sgm_ram_en;   /* port $53 bit 0: 24K RAM over $2000-$7FFF */
+    uint8_t sgm_bios_off; /* port $7F bit 1 clear: RAM over the BIOS   */
+
     uint8_t mem_ctrl; /* port 0x7F: D0-D1 lower bank, D2-D3 upper bank */
     uint8_t net_ctrl; /* port 0x3F: bit0 net reset, bit1 EOS ROM enable */
     int game_mode;    /* 1 after a mode-1 (ColecoVision) reset */

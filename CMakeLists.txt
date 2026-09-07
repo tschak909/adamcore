@@ -60,6 +60,10 @@ add_executable(cart_ops_test tests/machine/cart_ops_test.c)
 target_link_libraries(cart_ops_test adamcore)
 add_test(NAME cart_ops COMMAND cart_ops_test)
 
+add_executable(sgm_test tests/machine/sgm_test.c)
+target_link_libraries(sgm_test adamcore)
+add_test(NAME sgm COMMAND sgm_test)
+
 add_executable(debug_step_test tests/machine/debug_step_test.c)
 target_include_directories(debug_step_test PRIVATE src)
 target_link_libraries(debug_step_test adamcore)

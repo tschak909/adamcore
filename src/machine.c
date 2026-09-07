@@ -65,7 +65,28 @@ static uint8_t mem_read_at(adamcore *c, uint16_t a, int commit)
         case 1: return c->ram[a];
         case 2: return c->xram[a];
         default:
-            return a < 0x2000 ? c->os7[a] : c->ram[a];
+            /* OS7 low, RAM above -- but how much RAM depends on the machine.
+             *
+             * An ADAM in game mode has its own 64K behind this map, so the
+             * whole 24K is real. A ColecoVision does NOT: it has 1K, at
+             * $6000-$63FF, mirrored up through $7FFF by partial decoding,
+             * with $2000-$5FFF unpopulated. Serving a bare console 24K here
+             * would be modelling an Opcode Super Game Module that is not
+             * plugged in.
+             *
+             * The mirror is not cosmetic. A FujiNet cartridge relies on it:
+             * A15 does not reach the cartridge connector, so a RAM access at
+             * $7C00-$7FFF puts exactly the same bits on A0-A14 as a cartridge
+             * read of $FC00-$FFFF, which is why the cartridge firmware serves
+             * speculatively and commits only on the chip select. It is also
+             * why the network-boot swap stub is safe to run from $6000. */
+            if (a < 0x2000)
+                return (c->cv && c->sgm_bios_off) ? c->ram[a] : c->os7[a];
+            if (!c->cv || c->sgm_ram_en)
+                return c->ram[a];
+            if (a >= 0x6000)
+                return c->ram[0x6000 | (a & 0x03FF)];
+            return 0xFF; /* unpopulated */
         }
     }
     switch ((c->mem_ctrl >> 2) & 3) {
@@ -94,7 +115,18 @@ static void mem_write_at(adamcore *c, uint16_t a, uint8_t v, int commit)
         switch (c->mem_ctrl & 3) {
         case 1: c->ram[a] = v; break;
         case 2: c->xram[a] = v; break;
-        case 3: if (a >= 0x2000) c->ram[a] = v; break;
+        case 3:
+            /* Mirrors mem_read_at's case 3 exactly; see the comment there. */
+            if (a < 0x2000) {
+                if (c->cv && c->sgm_bios_off) c->ram[a] = v;
+                break;                        /* otherwise ROM */
+            }
+            if (!c->cv || c->sgm_ram_en) {
+                c->ram[a] = v;
+            } else if (a >= 0x6000) {
+                c->ram[0x6000 | (a & 0x03FF)] = v;
+            }
+            break;
         default: break; /* ROM */
         }
         return;
@@ -210,6 +242,11 @@ static void machine_reset(adamcore *c, int mode)
     tms_reset(&c->vdp);
     c->net_ctrl = 0;
     c->joy_mode = 1;
+    /* The Super Game Module sits on the expansion connector, which carries
+     * /RESET -- so unlike the cartridge, it does see a console reset. Its RAM
+     * comes back disabled and the BIOS comes back mapped. */
+    c->sgm_ram_en = 0;
+    c->sgm_bios_off = 0;
     if (mode == 1) {
         /* game (ColecoVision) reset: OS7 + 24K RAM low, cartridge high */
         c->game_mode = 1;
@@ -287,6 +324,8 @@ adamcore *adamcore_create(const adamcore_config *cfg)
         if (c->cart_size < 0)
             goto fail;
     }
+
+    c->cv = (cfg->start_machine == ADAMCORE_MACHINE_CV);
 
     c->cpu.ud = c;
     c->cpu.mem_read = mem_read;

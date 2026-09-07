@@ -61,6 +61,13 @@ typedef struct {
     int joystick_mode;    /* 0 none, 1 both ports, 2 port 2 only, 3 port 1 only */
     int swap_buttons;     /* 0/1 */
     int reverse_keypad;   /* 0/1 */
+
+    /* Opcode Super Game Module: an AY-3-8910 on ports $50-$52 and a 24K RAM
+     * expansion the cartridge enables through port $53. ColecoVision only;
+     * ignored for ADAM, which has that memory of its own. Absent (0) the
+     * machine is a stock console: $2000-$5FFF open bus, $6000-$7FFF the real
+     * 1K mirrored, and $50-$53 undecoded. */
+    int sgm;
     int audio_rate;       /* host sample rate, e.g. 44100 */
 } adamcore_config;
 
