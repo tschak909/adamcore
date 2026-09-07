@@ -21,6 +21,8 @@ add_library(adamcore STATIC
   src/z80.c
   src/tms9928a.c
   src/sn76489.c
+  src/ay8910.c
+  src/psg.c
   src/machine.c
   src/cart.c
   src/adamnet.c
@@ -63,6 +65,14 @@ add_test(NAME cart_ops COMMAND cart_ops_test)
 add_executable(sgm_test tests/machine/sgm_test.c)
 target_link_libraries(sgm_test adamcore)
 add_test(NAME sgm COMMAND sgm_test)
+
+add_executable(psg_test tests/psg/psg_test.c)
+target_link_libraries(psg_test adamcore)
+# Captured from the pre-refactor renderer (psg_test --capture). The split of
+# the shared timeline out of the chip model must not change a single sample
+# for a machine with no Super Game Module.
+target_compile_definitions(psg_test PRIVATE GOLDEN_SUM=0x5c0921643042f3c0ULL)
+add_test(NAME psg COMMAND psg_test)
 
 add_executable(debug_step_test tests/machine/debug_step_test.c)
 target_include_directories(debug_step_test PRIVATE src)

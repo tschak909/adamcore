@@ -8,7 +8,7 @@
 
 #include "adamcore.h"
 #include "adamnet.h"
-#include "sn76489.h"
+#include "psg.h"
 #include "tms9928a.h"
 #include "z80.h"
 
@@ -22,7 +22,7 @@
 struct adamcore {
     z80 cpu;
     tms9928a vdp;
-    sn76489 psg;
+    psg snd;
     adamnet an;
 
     adamcore_config cfg;

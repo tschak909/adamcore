@@ -229,7 +229,7 @@ static void io_write(void *ud, uint16_t port, uint8_t v)
         }
         break;
     case 0xC0: c->joy_mode = 1; break; /* joystick strobe */
-    case 0xE0: sn_write(&c->psg, c->cpu.cycles, v); break;
+    case 0xE0: psg_write_sn(&c->snd, c->cpu.cycles, v); break;
     default: break;
     }
 }
@@ -334,8 +334,10 @@ adamcore *adamcore_create(const adamcore_config *cfg)
     c->cpu.io_write = io_write;
 
     palette_build(cfg->palette, c->palette_rgb);
-    sn_reset(&c->psg, ADAM_CPU_CLOCK,
-             (uint32_t)(cfg->audio_rate > 0 ? cfg->audio_rate : 44100));
+    psg_reset(&c->snd, ADAM_CPU_CLOCK,
+              (uint32_t)(cfg->audio_rate > 0 ? cfg->audio_rate : 44100),
+              /* the AY joins only on a ColecoVision with an SGM fitted */
+              c->cv && cfg->sgm);
     adamnet_init(&c->an, c);
 
     c->joy[0] = c->joy[1] = 0x7F7F;
@@ -401,7 +403,7 @@ int machine_frame_tail(adamcore *c)
 {
     uint8_t bd;
 
-    sn_publish(&c->psg, c->cpu.cycles);
+    psg_publish(&c->snd, c->cpu.cycles);
 
     /* borders */
     bd = tms_backdrop(&c->vdp);
@@ -491,7 +493,7 @@ const uint16_t *adamcore_framebuffer(const adamcore *c, int *w, int *h)
 
 int adamcore_render_audio(adamcore *c, int16_t *out, int nsamples)
 {
-    sn_render(&c->psg, out, nsamples);
+    psg_render(&c->snd, out, nsamples);
     return nsamples;
 }
 
