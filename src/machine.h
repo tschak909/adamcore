@@ -8,7 +8,7 @@
 
 #include "adamcore.h"
 #include "adamnet.h"
-#include "sn76489.h"
+#include "psg.h"
 #include "tms9928a.h"
 #include "z80.h"
 
@@ -22,7 +22,7 @@
 struct adamcore {
     z80 cpu;
     tms9928a vdp;
-    sn76489 psg;
+    psg snd;
     adamnet an;
 
     adamcore_config cfg;
@@ -34,6 +34,21 @@ struct adamcore {
     uint8_t wp[0x8000];
     uint8_t cart[0x8000];
     int cart_size;
+
+    /* Optional cartridge device owning the $8000-$FFFF window; when set it
+     * supersedes cart[] entirely. See adamcore_cart_ops. */
+    const adamcore_cart_ops *cart_ops;
+    void *cart_ops_ud;
+
+    uint8_t cv;       /* created as a ColecoVision (cfg.start_machine) */
+
+    /* Super Game Module, meaningful only when cv && cfg.sgm. Both clear at
+     * power-on and on a console reset: the SGM hangs off the expansion
+     * connector, which unlike the cartridge edge does carry /RESET. */
+    uint8_t sgm_ram_en;   /* port $53 bit 0: 24K RAM over $2000-$7FFF */
+    uint8_t sgm_bios_off; /* port $7F bit 1 clear: RAM over the BIOS   */
+    uint8_t ay_addr;      /* port $50: the AY's latched register number */
+    uint8_t ay_regs[AY_NREG]; /* emu-thread mirror; what port $52 reads  */
 
     uint8_t mem_ctrl; /* port 0x7F: D0-D1 lower bank, D2-D3 upper bank */
     uint8_t net_ctrl; /* port 0x3F: bit0 net reset, bit1 EOS ROM enable */

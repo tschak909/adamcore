@@ -13,4 +13,8 @@
  * decoding does. Returns image size, or -1 on error. */
 int cart_load(const char *path, uint8_t out[0x8000]);
 
+/* The same, from memory rather than a file. size 0 (or image NULL) clears the
+ * window to 0xFF. Returns the stored size, or -1 if size > 32K. */
+int cart_fill(const uint8_t *image, uint32_t size, uint8_t out[0x8000]);
+
 #endif

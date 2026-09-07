@@ -40,9 +40,22 @@
 
 /* ---- memory -------------------------------------------------------------- */
 
-static uint8_t mem_read(void *ud, uint16_t a)
+/* The bus read, with `commit` telling a device whether this is a real cycle.
+ *
+ * commit = 1 is the Z80 executing: a cartridge device may move a bank or fire
+ * a hotspot. commit = 0 is machine_mem_read() below -- adamcore_peek,
+ * adamcore_peek_block, and through them every debugger memory view and
+ * disassembly line -- where the byte must come back with nothing observable
+ * changed. MAME calls the same distinction side_effects_disabled().
+ *
+ * This matters more than it looks. A FujiNet cartridge decodes a read-hotspot
+ * mailbox in the top three pages of its window, so a debugger that peeked
+ * through the committing path would arm protocol registers, append bytes to
+ * the outgoing stream, and eventually hit the ROM-swap hotspot -- merely
+ * opening a memory view would corrupt the link. Everything below 0x8000 is a
+ * plain banked-array decode and ignores the flag. */
+static uint8_t mem_read_at(adamcore *c, uint16_t a, int commit)
 {
-    adamcore *c = ud;
     if (a < 0x8000) {
         switch (c->mem_ctrl & 3) {
         case 0:
@@ -52,7 +65,28 @@ static uint8_t mem_read(void *ud, uint16_t a)
         case 1: return c->ram[a];
         case 2: return c->xram[a];
         default:
-            return a < 0x2000 ? c->os7[a] : c->ram[a];
+            /* OS7 low, RAM above -- but how much RAM depends on the machine.
+             *
+             * An ADAM in game mode has its own 64K behind this map, so the
+             * whole 24K is real. A ColecoVision does NOT: it has 1K, at
+             * $6000-$63FF, mirrored up through $7FFF by partial decoding,
+             * with $2000-$5FFF unpopulated. Serving a bare console 24K here
+             * would be modelling an Opcode Super Game Module that is not
+             * plugged in.
+             *
+             * The mirror is not cosmetic. A FujiNet cartridge relies on it:
+             * A15 does not reach the cartridge connector, so a RAM access at
+             * $7C00-$7FFF puts exactly the same bits on A0-A14 as a cartridge
+             * read of $FC00-$FFFF, which is why the cartridge firmware serves
+             * speculatively and commits only on the chip select. It is also
+             * why the network-boot swap stub is safe to run from $6000. */
+            if (a < 0x2000)
+                return (c->cv && c->sgm_bios_off) ? c->ram[a] : c->os7[a];
+            if (!c->cv || c->sgm_ram_en)
+                return c->ram[a];
+            if (a >= 0x6000)
+                return c->ram[0x6000 | (a & 0x03FF)];
+            return 0xFF; /* unpopulated */
         }
     }
     switch ((c->mem_ctrl >> 2) & 3) {
@@ -60,18 +94,39 @@ static uint8_t mem_read(void *ud, uint16_t a)
     case 1: return 0xFF; /* expansion ROM socket, unpopulated */
     case 2: return c->xram[a];
     default:
+        if (c->cart_ops)
+            return c->cart_ops->read(c->cart_ops_ud, (uint16_t)(a - 0x8000),
+                                     commit);
         return c->cart_size > 0 ? c->cart[a - 0x8000] : 0xFF;
     }
 }
 
-static void mem_write(void *ud, uint16_t a, uint8_t v)
+static uint8_t mem_read(void *ud, uint16_t a)
 {
-    adamcore *c = ud;
+    return mem_read_at((adamcore *)ud, a, 1);
+}
+
+/* The bus write. `commit` carries the same meaning as in mem_read_at: 1 is
+ * the Z80, 0 is machine_mem_write() (adamcore_poke). Only the cartridge
+ * window looks at it -- a debugger memory edit must not switch a bank. */
+static void mem_write_at(adamcore *c, uint16_t a, uint8_t v, int commit)
+{
     if (a < 0x8000) {
         switch (c->mem_ctrl & 3) {
         case 1: c->ram[a] = v; break;
         case 2: c->xram[a] = v; break;
-        case 3: if (a >= 0x2000) c->ram[a] = v; break;
+        case 3:
+            /* Mirrors mem_read_at's case 3 exactly; see the comment there. */
+            if (a < 0x2000) {
+                if (c->cv && c->sgm_bios_off) c->ram[a] = v;
+                break;                        /* otherwise ROM */
+            }
+            if (!c->cv || c->sgm_ram_en) {
+                c->ram[a] = v;
+            } else if (a >= 0x6000) {
+                c->ram[0x6000 | (a & 0x03FF)] = v;
+            }
+            break;
         default: break; /* ROM */
         }
         return;
@@ -79,8 +134,20 @@ static void mem_write(void *ud, uint16_t a, uint8_t v)
     switch ((c->mem_ctrl >> 2) & 3) {
     case 0: c->ram[a] = v; break;
     case 2: c->xram[a] = v; break;
-    default: break; /* ROM */
+    default:
+        /* A cartridge device sees writes; a plain image does not. Reached
+         * only from the Z80's bus -- machine_mem_write (adamcore_poke) stops
+         * short of here on purpose, so a debugger memory edit cannot switch a
+         * bank. */
+        if (c->cart_ops && commit)
+            c->cart_ops->write(c->cart_ops_ud, (uint16_t)(a - 0x8000), v);
+        break;
     }
+}
+
+static void mem_write(void *ud, uint16_t a, uint8_t v)
+{
+    mem_write_at((adamcore *)ud, a, v, 1);
 }
 
 /* ---- controllers ---------------------------------------------------------- */
@@ -113,6 +180,27 @@ static uint8_t controller_read(adamcore *c, int portno)
 
 /* ---- I/O ------------------------------------------------------------------ */
 
+/* Is an Opcode Super Game Module fitted and answering?
+ *
+ * Gated on how the machine was CREATED, never on game_mode: any mode-1 reset
+ * sets game_mode, an ADAM user pressing game reset included, and an ADAM must
+ * not sprout an SGM. */
+static int sgm_live(const adamcore *c)
+{
+    return c->cv && c->cfg.sgm;
+}
+
+/* Port $52 reads the AY's register file. Served from the emulator-thread
+ * mirror, masked the way the chip masks it, so a read never has to reach
+ * across to the audio thread's synthesis state. */
+static uint8_t ay_read_reg_mirror(const adamcore *c)
+{
+    ay8910 view;
+    memset(&view, 0, sizeof view);
+    memcpy(view.reg, c->ay_regs, sizeof view.reg);
+    return ay_read_reg(&view, c->ay_addr);
+}
+
 static uint8_t io_read(void *ud, uint16_t port)
 {
     adamcore *c = ud;
@@ -120,7 +208,16 @@ static uint8_t io_read(void *ud, uint16_t port)
 
     switch (p & 0xE0) {
     case 0x20: return c->net_ctrl;
-    case 0x60: return c->mem_ctrl;
+    case 0x40:
+        /* $40-$5F. The Super Game Module decodes $50-$53 and nothing else
+         * here; the rest of the block is unpopulated on every machine. */
+        if (sgm_live(c) && p == 0x52)
+            return ay_read_reg_mirror(c);
+        return 0xFF;
+    case 0x60:
+        /* $7F is the ADAM's memory-map control. A ColecoVision has no such
+         * register to read back -- see io_write. */
+        return c->cv ? 0xFF : c->mem_ctrl;
     case 0xA0:
         if (p & 1) {
             uint8_t v = tms_read_status(&c->vdp);
@@ -147,8 +244,40 @@ static void io_write(void *ud, uint16_t port, uint8_t v)
                 adamnet_reset(&c->an); /* reset on bit0 high->low */
         }
         break;
+    case 0x40:
+        if (!sgm_live(c)) break; /* stock console: nothing decodes $40-$5F */
+        switch (p) {
+        case 0x50: c->ay_addr = (uint8_t)(v & 0x0F); break;
+        case 0x51:
+            /* The mirror is the emulator thread's copy, kept because $52 is
+             * a READ and the synthesis state belongs to the audio thread.
+             * Resolving the latch here is also what lets the queue carry a
+             * register number rather than a raw byte (see psg.h). */
+            c->ay_regs[c->ay_addr] = v;
+            psg_write_ay(&c->snd, c->cpu.cycles, c->ay_addr, v);
+            break;
+        case 0x53: c->sgm_ram_en = (uint8_t)(v & 1); break;
+        default: break;
+        }
+        break;
     case 0x60:
-        if (p == 0x7F) c->mem_ctrl = (uint8_t)(v & 0x0F);
+        if (p != 0x7F) break;
+        if (c->cv) {
+            /* On a ColecoVision, $7F is the Super Game Module's BIOS/RAM
+             * switch: bit 1 clear maps SGM RAM over the BIOS.
+             *
+             * It is NOT allowed to reach mem_ctrl. The SGM was built to
+             * imitate the ADAM's map and the two values real SGM software
+             * writes ($0F and $0D) happen to decode correctly, but that is
+             * luck: mem_ctrl's bits 2-3 select the UPPER 32K, so any $7F
+             * write whose bits 2-3 are not both set -- $02, say, which means
+             * nothing but "BIOS on" to an SGM -- would make the cartridge
+             * vanish from $8000-$FFFF. */
+            if (sgm_live(c))
+                c->sgm_bios_off = (uint8_t)(!(v & 0x02));
+            break;
+        }
+        c->mem_ctrl = (uint8_t)(v & 0x0F);
         break;
     case 0x80: c->joy_mode = 0; break; /* keypad strobe */
     case 0xA0:
@@ -162,7 +291,7 @@ static void io_write(void *ud, uint16_t port, uint8_t v)
         }
         break;
     case 0xC0: c->joy_mode = 1; break; /* joystick strobe */
-    case 0xE0: sn_write(&c->psg, c->cpu.cycles, v); break;
+    case 0xE0: psg_write_sn(&c->snd, c->cpu.cycles, v); break;
     default: break;
     }
 }
@@ -175,6 +304,13 @@ static void machine_reset(adamcore *c, int mode)
     tms_reset(&c->vdp);
     c->net_ctrl = 0;
     c->joy_mode = 1;
+    /* The Super Game Module sits on the expansion connector, which carries
+     * /RESET -- so unlike the cartridge, it does see a console reset. Its RAM
+     * comes back disabled and the BIOS comes back mapped. */
+    c->sgm_ram_en = 0;
+    c->sgm_bios_off = 0;
+    c->ay_addr = 0;
+    memset(c->ay_regs, 0, sizeof c->ay_regs);
     if (mode == 1) {
         /* game (ColecoVision) reset: OS7 + 24K RAM low, cartridge high */
         c->game_mode = 1;
@@ -185,6 +321,17 @@ static void machine_reset(adamcore *c, int mode)
         c->mem_ctrl = 0x00;
     }
     adamnet_reset(&c->an);
+
+    /* Deliberately NOT c->cart_ops->reset(). The cartridge edge connector
+     * carries no reset line -- neither the console's RESET button nor a
+     * mode switch reaches a cartridge, so on hardware it simply never sees
+     * one, and a device that reset itself here would be less accurate, not
+     * more. For the FujiNet cartridge it would also be a protocol bug: its
+     * client takes each transaction's sequence number from the value the
+     * cartridge last acknowledged, precisely so a client restart cannot
+     * replay a number the cartridge has already answered. Reset that and the
+     * first transaction after a reset gets silence, and the stale reply still
+     * sitting in the window reads as success. */
 }
 
 /* ---- ROM loading ---------------------------------------------------------- */
@@ -242,6 +389,8 @@ adamcore *adamcore_create(const adamcore_config *cfg)
             goto fail;
     }
 
+    c->cv = (cfg->start_machine == ADAMCORE_MACHINE_CV);
+
     c->cpu.ud = c;
     c->cpu.mem_read = mem_read;
     c->cpu.mem_write = mem_write;
@@ -249,8 +398,10 @@ adamcore *adamcore_create(const adamcore_config *cfg)
     c->cpu.io_write = io_write;
 
     palette_build(cfg->palette, c->palette_rgb);
-    sn_reset(&c->psg, ADAM_CPU_CLOCK,
-             (uint32_t)(cfg->audio_rate > 0 ? cfg->audio_rate : 44100));
+    psg_reset(&c->snd, ADAM_CPU_CLOCK,
+              (uint32_t)(cfg->audio_rate > 0 ? cfg->audio_rate : 44100),
+              /* the AY joins only on a ColecoVision with an SGM fitted */
+              c->cv && cfg->sgm);
     adamnet_init(&c->an, c);
 
     c->joy[0] = c->joy[1] = 0x7F7F;
@@ -316,7 +467,7 @@ int machine_frame_tail(adamcore *c)
 {
     uint8_t bd;
 
-    sn_publish(&c->psg, c->cpu.cycles);
+    psg_publish(&c->snd, c->cpu.cycles);
 
     /* borders */
     bd = tms_backdrop(&c->vdp);
@@ -337,14 +488,32 @@ int machine_frame_tail(adamcore *c)
     return 0;
 }
 
+void adamcore_set_cart_ops(adamcore *c, const adamcore_cart_ops *ops, void *ud)
+{
+    c->cart_ops = ops;
+    c->cart_ops_ud = ud;
+    /* Power-on, not console reset: this is the moment the cartridge is
+     * plugged in. machine_reset() explains why it is the only one. */
+    if (ops && ops->reset)
+        ops->reset(ud);
+}
+
+int adamcore_cart_insert(adamcore *c, const uint8_t *image, uint32_t size)
+{
+    int n = cart_fill(image, size, c->cart);
+    if (n < 0) return -1;
+    c->cart_size = n;
+    return n;
+}
+
 uint8_t machine_mem_read(adamcore *c, uint16_t a)
 {
-    return mem_read(c, a); /* pure banked array decode; no device access */
+    return mem_read_at(c, a, 0); /* no device side effects; see mem_read_at */
 }
 
 void machine_mem_write(adamcore *c, uint16_t a, uint8_t v)
 {
-    mem_write(c, a, v);
+    mem_write_at(c, a, v, 0); /* no device side effects; see mem_write_at */
 }
 
 int adamcore_run_frame(adamcore *c)
@@ -388,7 +557,7 @@ const uint16_t *adamcore_framebuffer(const adamcore *c, int *w, int *h)
 
 int adamcore_render_audio(adamcore *c, int16_t *out, int nsamples)
 {
-    sn_render(&c->psg, out, nsamples);
+    psg_render(&c->snd, out, nsamples);
     return nsamples;
 }
 

@@ -12,6 +12,26 @@ All lookup tables in this repository (palette, flag tables, etc.) are derived
 from datasheets or first principles as documented in source comments — none are
 copied from another program.
 
+## Cartridge devices are out of tree
+
+`adamcore_cart_ops` is a vtable the *host* fills in. adamcore models the
+console; it ships no cartridge-mapper knowledge at all, and the flat image
+loading in `cart.c` is the whole of what it knows about cartridges.
+
+This is deliberate and is part of the clean-room position, not merely a
+layering preference. The established ColecoVision mappers -- MegaCart,
+Activision, X-in-1, the Opcode Super Game Cart -- are modelled in
+`colmap.c`, which lives in `fujinet-firmware` (BSD-3-Clause, same author) and
+whose comments state plainly that it matches MAME's handlers on purpose,
+because being byte-compatible with MAME is what makes its cartridge soak test
+meaningful. That is emulator-behaviour-derived knowledge. Bringing it into
+this repository would make the statement above false, so it stays on the
+host's side of the vtable, where its own provenance is recorded and correct.
+
+The AY-3-8910 added for the Super Game Module was written from the GI data
+sheet listed below. No emulator implementation of it -- MAME, openMSX,
+blueMSX, ColEm or any other -- was opened or consulted.
+
 ## Reference materials consulted
 
 Hardware documentation:
@@ -29,7 +49,16 @@ Hardware documentation:
 - Texas Instruments SN76489 datasheet and published ColecoVision-specific notes
   on the noise LFSR configuration
 - Public ColecoVision technical documentation: I/O port map, cartridge header
-  conventions, controller/keypad encodings
+  conventions, controller/keypad encodings, the cartridge and expansion
+  connector pinouts (which is where the rule that a cartridge never sees the
+  console's reset line, while an expansion module does, comes from)
+- General Instrument AY-3-8910/8912 Programmable Sound Generator data sheet:
+  register map and register widths, the 16-level logarithmic amplitude
+  control and its 5-bit envelope resolution, the envelope shape decode
+  (CONTINUE / ATTACK / ALTERNATE / HOLD), the tone, noise and envelope
+  dividers, and the 17-bit noise shift register
+- Published Opcode Super Game Module documentation: ports $50-$53, the $7F
+  bit-1 BIOS/RAM switch, the 24K expansion at $2000-$7FFF, and the AY clock
 
 Test material:
 

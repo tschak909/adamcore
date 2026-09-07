@@ -1,8 +1,14 @@
 /*
- * adamcore - SN76489AN Programmable Sound Generator
+ * adamcore - SN76489AN Programmable Sound Generator (chip model only)
  *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * State and behaviour of the chip and nothing else. The timestamped write
+ * queue, the render timeline and the mix live in psg.c, which drives this and
+ * -- on a machine with an Opcode Super Game Module -- an AY-3-8910 from one
+ * shared clock. Two chips with two timelines would drift against each other
+ * mid-note, so there is only ever one.
  */
 
 #ifndef ADAMCORE_SN76489_H
@@ -10,10 +16,7 @@
 
 #include <stdint.h>
 
-#define SN_QUEUE_LEN 4096 /* power of two */
-
 typedef struct {
-    /* synthesis state (audio-thread side) */
     uint16_t period[3];
     int16_t counter[3];
     uint8_t out[3];
@@ -23,32 +26,22 @@ typedef struct {
     int16_t noise_counter;
     uint8_t noise_out;
     uint8_t latched_reg;
-
-    /* register mirror (emu-thread side, for latch semantics) */
-    uint8_t wlatch;
-
-    uint32_t clock;      /* PSG input clock, Hz */
-    uint32_t rate;       /* output sample rate */
-    uint64_t sample_pos; /* samples synthesized so far */
-    volatile uint64_t emu_pos; /* emulator's position on the sample clock */
-    uint32_t tick_acc;   /* 16.16 fixed-point tick accumulator */
-    uint32_t ticks_per_sample; /* 16.16: (clock/16)/rate */
-
-    /* SPSC timestamped write queue: emu thread produces, audio consumes */
-    struct { uint64_t when; uint8_t val; } queue[SN_QUEUE_LEN];
-    volatile uint32_t qw, qr;
 } sn76489;
 
-void sn_reset(sn76489 *s, uint32_t clock, uint32_t rate);
+/* Peak per channel. Four channels sum to 26212, inside S16 with room to
+ * spare -- which is what makes adding the AY's three channels safe without
+ * rescaling this one and quietly making every existing machine quieter. */
+#define SN_CHANNEL_PEAK 6553
 
-/* Emu thread: queue a PSG bus write occurring at absolute CPU cycle count. */
-void sn_write(sn76489 *s, uint64_t cpu_cycles, uint8_t val);
+void sn_reset(sn76489 *s);
 
-/* Emu thread, once per frame: publish the emulated clock so the renderer
- * can keep its timeline a fixed short latency behind the emulator. */
-void sn_publish(sn76489 *s, uint64_t cpu_cycles);
+/* One bus write to the chip's single data port. */
+void sn_write_reg(sn76489 *s, uint8_t val);
 
-/* Audio thread: synthesize n mono S16 samples. */
-void sn_render(sn76489 *s, int16_t *out, int n);
+/* One tick of the chip's internal clock (input clock / 16). */
+void sn_tick(sn76489 *s);
+
+/* Current output level, summed across the three tones and the noise. */
+int sn_mix(const sn76489 *s);
 
 #endif

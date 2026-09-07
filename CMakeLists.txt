@@ -10,25 +10,13 @@ endif()
 
 add_compile_options(-Wall -Wextra)
 
-# Sources grow milestone by milestone; see README.
-if(WIN32)
-  set(ADAMCORE_NET_SOURCE src/net_win32.c)
-else()
-  set(ADAMCORE_NET_SOURCE src/net_posix.c)
-endif()
+# The source list lives in adamcore-sources.cmake and is used from there by
+# this build AND by the hosts that stage these sources into their own tree, so
+# adding a file here cannot silently break their link.
+include(${CMAKE_CURRENT_LIST_DIR}/adamcore-sources.cmake)
+adamcore_sources(ADAMCORE_SOURCES ROOT "${CMAKE_CURRENT_LIST_DIR}")
 
-add_library(adamcore STATIC
-  src/z80.c
-  src/tms9928a.c
-  src/sn76489.c
-  src/machine.c
-  src/cart.c
-  src/adamnet.c
-  src/boip.c
-  ${ADAMCORE_NET_SOURCE}
-  src/palette.c
-  src/debug.c
-)
+add_library(adamcore STATIC ${ADAMCORE_SOURCES})
 target_include_directories(adamcore PUBLIC include PRIVATE src)
 set_property(TARGET adamcore PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(WIN32)
@@ -55,6 +43,22 @@ target_link_libraries(zex_runner adamcore)
 add_executable(boip_fake_fujinet tests/adamnet/boip_fake_fujinet.c)
 target_include_directories(boip_fake_fujinet PRIVATE src)
 target_link_libraries(boip_fake_fujinet adamcore pthread)
+
+add_executable(cart_ops_test tests/machine/cart_ops_test.c)
+target_link_libraries(cart_ops_test adamcore)
+add_test(NAME cart_ops COMMAND cart_ops_test)
+
+add_executable(sgm_test tests/machine/sgm_test.c)
+target_link_libraries(sgm_test adamcore)
+add_test(NAME sgm COMMAND sgm_test)
+
+add_executable(psg_test tests/psg/psg_test.c)
+target_link_libraries(psg_test adamcore)
+# Captured from the pre-refactor renderer (psg_test --capture). The split of
+# the shared timeline out of the chip model must not change a single sample
+# for a machine with no Super Game Module.
+target_compile_definitions(psg_test PRIVATE GOLDEN_SUM=0x5c0921643042f3c0ULL)
+add_test(NAME psg COMMAND psg_test)
 
 add_executable(debug_step_test tests/machine/debug_step_test.c)
 target_include_directories(debug_step_test PRIVATE src)
