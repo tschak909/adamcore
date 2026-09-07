@@ -40,9 +40,23 @@
 
 /* ---- memory -------------------------------------------------------------- */
 
-static uint8_t mem_read(void *ud, uint16_t a)
+/* The bus read, with `commit` telling a device whether this is a real cycle.
+ *
+ * commit = 1 is the Z80 executing: a cartridge device may move a bank or fire
+ * a hotspot. commit = 0 is machine_mem_read() below -- adamcore_peek,
+ * adamcore_peek_block, and through them every debugger memory view and
+ * disassembly line -- where the byte must come back with nothing observable
+ * changed. MAME calls the same distinction side_effects_disabled().
+ *
+ * This matters more than it looks. A FujiNet cartridge decodes a read-hotspot
+ * mailbox in the top three pages of its window, so a debugger that peeked
+ * through the committing path would arm protocol registers, append bytes to
+ * the outgoing stream, and eventually hit the ROM-swap hotspot -- merely
+ * opening a memory view would corrupt the link. Everything below 0x8000 is a
+ * plain banked-array decode and ignores the flag. */
+static uint8_t mem_read_at(adamcore *c, uint16_t a, int commit)
 {
-    adamcore *c = ud;
+    (void)commit; /* consumed by the cartridge device; see adamcore_cart_ops */
     if (a < 0x8000) {
         switch (c->mem_ctrl & 3) {
         case 0:
@@ -62,6 +76,11 @@ static uint8_t mem_read(void *ud, uint16_t a)
     default:
         return c->cart_size > 0 ? c->cart[a - 0x8000] : 0xFF;
     }
+}
+
+static uint8_t mem_read(void *ud, uint16_t a)
+{
+    return mem_read_at((adamcore *)ud, a, 1);
 }
 
 static void mem_write(void *ud, uint16_t a, uint8_t v)
@@ -339,7 +358,7 @@ int machine_frame_tail(adamcore *c)
 
 uint8_t machine_mem_read(adamcore *c, uint16_t a)
 {
-    return mem_read(c, a); /* pure banked array decode; no device access */
+    return mem_read_at(c, a, 0); /* no device side effects; see mem_read_at */
 }
 
 void machine_mem_write(adamcore *c, uint16_t a, uint8_t v)
