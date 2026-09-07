@@ -180,6 +180,27 @@ static uint8_t controller_read(adamcore *c, int portno)
 
 /* ---- I/O ------------------------------------------------------------------ */
 
+/* Is an Opcode Super Game Module fitted and answering?
+ *
+ * Gated on how the machine was CREATED, never on game_mode: any mode-1 reset
+ * sets game_mode, an ADAM user pressing game reset included, and an ADAM must
+ * not sprout an SGM. */
+static int sgm_live(const adamcore *c)
+{
+    return c->cv && c->cfg.sgm;
+}
+
+/* Port $52 reads the AY's register file. Served from the emulator-thread
+ * mirror, masked the way the chip masks it, so a read never has to reach
+ * across to the audio thread's synthesis state. */
+static uint8_t ay_read_reg_mirror(const adamcore *c)
+{
+    ay8910 view;
+    memset(&view, 0, sizeof view);
+    memcpy(view.reg, c->ay_regs, sizeof view.reg);
+    return ay_read_reg(&view, c->ay_addr);
+}
+
 static uint8_t io_read(void *ud, uint16_t port)
 {
     adamcore *c = ud;
@@ -187,7 +208,16 @@ static uint8_t io_read(void *ud, uint16_t port)
 
     switch (p & 0xE0) {
     case 0x20: return c->net_ctrl;
-    case 0x60: return c->mem_ctrl;
+    case 0x40:
+        /* $40-$5F. The Super Game Module decodes $50-$53 and nothing else
+         * here; the rest of the block is unpopulated on every machine. */
+        if (sgm_live(c) && p == 0x52)
+            return ay_read_reg_mirror(c);
+        return 0xFF;
+    case 0x60:
+        /* $7F is the ADAM's memory-map control. A ColecoVision has no such
+         * register to read back -- see io_write. */
+        return c->cv ? 0xFF : c->mem_ctrl;
     case 0xA0:
         if (p & 1) {
             uint8_t v = tms_read_status(&c->vdp);
@@ -214,8 +244,40 @@ static void io_write(void *ud, uint16_t port, uint8_t v)
                 adamnet_reset(&c->an); /* reset on bit0 high->low */
         }
         break;
+    case 0x40:
+        if (!sgm_live(c)) break; /* stock console: nothing decodes $40-$5F */
+        switch (p) {
+        case 0x50: c->ay_addr = (uint8_t)(v & 0x0F); break;
+        case 0x51:
+            /* The mirror is the emulator thread's copy, kept because $52 is
+             * a READ and the synthesis state belongs to the audio thread.
+             * Resolving the latch here is also what lets the queue carry a
+             * register number rather than a raw byte (see psg.h). */
+            c->ay_regs[c->ay_addr] = v;
+            psg_write_ay(&c->snd, c->cpu.cycles, c->ay_addr, v);
+            break;
+        case 0x53: c->sgm_ram_en = (uint8_t)(v & 1); break;
+        default: break;
+        }
+        break;
     case 0x60:
-        if (p == 0x7F) c->mem_ctrl = (uint8_t)(v & 0x0F);
+        if (p != 0x7F) break;
+        if (c->cv) {
+            /* On a ColecoVision, $7F is the Super Game Module's BIOS/RAM
+             * switch: bit 1 clear maps SGM RAM over the BIOS.
+             *
+             * It is NOT allowed to reach mem_ctrl. The SGM was built to
+             * imitate the ADAM's map and the two values real SGM software
+             * writes ($0F and $0D) happen to decode correctly, but that is
+             * luck: mem_ctrl's bits 2-3 select the UPPER 32K, so any $7F
+             * write whose bits 2-3 are not both set -- $02, say, which means
+             * nothing but "BIOS on" to an SGM -- would make the cartridge
+             * vanish from $8000-$FFFF. */
+            if (sgm_live(c))
+                c->sgm_bios_off = (uint8_t)(!(v & 0x02));
+            break;
+        }
+        c->mem_ctrl = (uint8_t)(v & 0x0F);
         break;
     case 0x80: c->joy_mode = 0; break; /* keypad strobe */
     case 0xA0:
@@ -247,6 +309,8 @@ static void machine_reset(adamcore *c, int mode)
      * comes back disabled and the BIOS comes back mapped. */
     c->sgm_ram_en = 0;
     c->sgm_bios_off = 0;
+    c->ay_addr = 0;
+    memset(c->ay_regs, 0, sizeof c->ay_regs);
     if (mode == 1) {
         /* game (ColecoVision) reset: OS7 + 24K RAM low, cartridge high */
         c->game_mode = 1;

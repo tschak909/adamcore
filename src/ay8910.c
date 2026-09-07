@@ -34,9 +34,16 @@ static const int16_t amp_table[32] = {
      1956,  2325,  2763,  3284,  3903,  4639,  5514,  6553
 };
 
-/* The 4-bit fixed volume selects every other envelope level: level n of 16
- * is 2n+1 of 32. */
-static uint8_t fixed_level(uint8_t vol4) { return (uint8_t)(vol4 * 2 + 1); }
+/* The 4-bit fixed volume selects every other envelope level: level n of 16 is
+ * 2n+1 of 32, so 15 lands on the envelope's own maximum. Volume 0 is the
+ * exception and must be true silence, not the quietest audible step -- a
+ * cartridge that never touches the chip leaves all three amplitudes at 0, and
+ * anything above zero there would put a constant DC offset under every
+ * machine with a Super Game Module fitted. */
+static uint8_t fixed_level(uint8_t vol4)
+{
+    return vol4 ? (uint8_t)(vol4 * 2 + 1) : 0;
+}
 
 void ay_reset(ay8910 *a)
 {

@@ -47,6 +47,8 @@ struct adamcore {
      * connector, which unlike the cartridge edge does carry /RESET. */
     uint8_t sgm_ram_en;   /* port $53 bit 0: 24K RAM over $2000-$7FFF */
     uint8_t sgm_bios_off; /* port $7F bit 1 clear: RAM over the BIOS   */
+    uint8_t ay_addr;      /* port $50: the AY's latched register number */
+    uint8_t ay_regs[AY_NREG]; /* emu-thread mirror; what port $52 reads  */
 
     uint8_t mem_ctrl; /* port 0x7F: D0-D1 lower bank, D2-D3 upper bank */
     uint8_t net_ctrl; /* port 0x3F: bit0 net reset, bit1 EOS ROM enable */

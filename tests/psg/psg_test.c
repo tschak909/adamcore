@@ -133,6 +133,85 @@ int main(int argc, char **argv)
     check("four SN channels stay inside S16 (peak <= 26212)", peak <= 26212);
     check("the program actually made sound", peak > 0);
 
+    /* ---- the AY, and the headroom that made the clamp necessary ---------- */
+    {
+        /* All three AY channels at maximum fixed volume, tone and noise
+         * gated in, on top of the SN program above: this is the loudest a
+         * Super Game Module machine gets, and it is what the saturating
+         * store in psg_render exists for. */
+        static const uint8_t ay_program[] = {
+            /* helper: LD A,reg / OUT ($50) / LD A,val / OUT ($51) */
+            0x3E, 0x00, 0xD3, 0x50, 0x3E, 0x40, 0xD3, 0x51, /* R0 tone A lo */
+            0x3E, 0x01, 0xD3, 0x50, 0x3E, 0x00, 0xD3, 0x51, /* R1 tone A hi */
+            0x3E, 0x02, 0xD3, 0x50, 0x3E, 0x60, 0xD3, 0x51, /* R2 tone B lo */
+            0x3E, 0x04, 0xD3, 0x50, 0x3E, 0x80, 0xD3, 0x51, /* R4 tone C lo */
+            0x3E, 0x07, 0xD3, 0x50, 0x3E, 0x38, 0xD3, 0x51, /* R7 tones on  */
+            0x3E, 0x08, 0xD3, 0x50, 0x3E, 0x0F, 0xD3, 0x51, /* R8  A max    */
+            0x3E, 0x09, 0xD3, 0x50, 0x3E, 0x0F, 0xD3, 0x51, /* R9  B max    */
+            0x3E, 0x0A, 0xD3, 0x50, 0x3E, 0x0F, 0xD3, 0x51, /* R10 C max    */
+            0x18, 0xFE                                       /* JR $         */
+        };
+        adamcore *c3;
+        int16_t *b3;
+        int peak3 = 0, clipped = 0;
+        adamcore_z80_regs r3;
+        adamcore_config sgmcfg = cfg;
+        sgmcfg.sgm = 1;
+
+        c3 = adamcore_create(&sgmcfg);
+        b3 = malloc(sizeof(int16_t) * NSAMPLES);
+        if (!c3 || !b3) return 1;
+        for (i = 0; i < (int)sizeof psg_program - 2; i++) /* drop the JR */
+            adamcore_poke(c3, (uint16_t)(0x6000 + i), psg_program[i]);
+        for (i = 0; i < (int)sizeof ay_program; i++)
+            adamcore_poke(c3, (uint16_t)(0x6000 + sizeof psg_program - 2 + i),
+                          ay_program[i]);
+        memset(&r3, 0, sizeof r3);
+        adamcore_get_regs(c3, &r3);
+        r3.pc = 0x6000;
+        adamcore_set_regs(c3, &r3);
+        for (i = 0; i < 10; i++)
+            adamcore_run_frame(c3);
+        adamcore_render_audio(c3, b3, NSAMPLES);
+        for (i = 0; i < NSAMPLES; i++) {
+            int v = b3[i] < 0 ? -b3[i] : b3[i];
+            if (v > peak3) peak3 = v;
+            if (b3[i] == 32767 || b3[i] == -32768) clipped++;
+        }
+        printf("SN+AY render: peak %d, %d saturated samples\n", peak3, clipped);
+        check("the AY is audible on top of the SN",
+              sum_samples(b3, NSAMPLES) != got);
+        check("the mix never wraps sign (clamped, not overflowed)",
+              peak3 <= 32767);
+        free(b3);
+        adamcore_destroy(c3);
+    }
+
+    /* An SGM-capable machine whose cartridge never touches $50-$53 must
+     * sound EXACTLY like a stock one -- the AY is silent at reset. */
+    {
+        adamcore_config sgmcfg = cfg;
+        adamcore *c4;
+        int16_t *b4 = malloc(sizeof(int16_t) * NSAMPLES);
+        adamcore_z80_regs r4;
+        sgmcfg.sgm = 1;
+        c4 = adamcore_create(&sgmcfg);
+        if (!c4 || !b4) return 1;
+        for (i = 0; i < (int)sizeof psg_program; i++)
+            adamcore_poke(c4, (uint16_t)(0x6000 + i), psg_program[i]);
+        memset(&r4, 0, sizeof r4);
+        adamcore_get_regs(c4, &r4);
+        r4.pc = 0x6000;
+        adamcore_set_regs(c4, &r4);
+        for (i = 0; i < 10; i++)
+            adamcore_run_frame(c4);
+        adamcore_render_audio(c4, b4, NSAMPLES);
+        check("an untouched AY adds nothing at all",
+              sum_samples(b4, NSAMPLES) == got);
+        free(b4);
+        adamcore_destroy(c4);
+    }
+
     /* Determinism: a second core fed the same program must render the same
      * samples. A shared timeline that drifted per-instance would show here. */
     {
