@@ -148,6 +148,20 @@ void adamcore_inject_key(adamcore *c, uint8_t adam_char);
 void adamcore_set_joystick(adamcore *c, int port, uint16_t state);
 void adamcore_request_reset(adamcore *c, int mode); /* 0 = ADAM, 1 = CV */
 
+/* ---- BoIP wire trace -------------------------------------------------------
+ * Every byte that crosses the AdamNet-over-IP link, for a host's protocol
+ * view. dir 1 is master -> FujiNet: one whole packet per call, made only
+ * after the write succeeded. dir 0 is FujiNet -> master: raw socket reads,
+ * so a packet can arrive split or several packets together; the host
+ * re-frames them. Called on the emulation thread, inside the frame, so keep
+ * it short. fn = NULL removes it. Both calls are emulation-thread only and
+ * do nothing when the core has no BoIP listener. */
+typedef void (*adamcore_boip_trace_fn)(void *ud, int dir, const uint8_t *buf,
+                                       int len);
+void adamcore_set_boip_trace(adamcore *c, adamcore_boip_trace_fn fn, void *ud);
+/* 1 while a FujiNet client is connected to the BoIP listener, else 0. */
+int  adamcore_boip_connected(const adamcore *c);
+
 #ifdef __cplusplus
 }
 #endif

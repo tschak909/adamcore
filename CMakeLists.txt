@@ -44,6 +44,11 @@ add_executable(boip_fake_fujinet tests/adamnet/boip_fake_fujinet.c)
 target_include_directories(boip_fake_fujinet PRIVATE src)
 target_link_libraries(boip_fake_fujinet adamcore pthread)
 
+add_executable(boip_trace_test tests/adamnet/boip_trace_test.c)
+target_include_directories(boip_trace_test PRIVATE src)
+target_link_libraries(boip_trace_test adamcore pthread)
+add_test(NAME boip_trace COMMAND boip_trace_test)
+
 add_executable(cart_ops_test tests/machine/cart_ops_test.c)
 target_link_libraries(cart_ops_test adamcore)
 add_test(NAME cart_ops COMMAND cart_ops_test)

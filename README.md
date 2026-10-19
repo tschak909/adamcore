@@ -23,7 +23,8 @@ app; a small Linux CLI runner lives in `cli/` for development and testing.
 - ColecoVision cartridges
 - A high-level AdamNet master: local keyboard device, plus "Bus over IP" (BoIP)
   forwarding of storage/network devices over loopback TCP to a connected
-  [FujiNet](https://fujinet.online/) (fujinet-pc built for the ADAM target)
+  [FujiNet](https://fujinet.online/) (fujinet-pc built for the ADAM target);
+  a host can watch the wire both ways with `adamcore_set_boip_trace`
 
 Out of scope (v1): local disk/tape images, printer, IDE, snapshots.
 Storage is expected to be served by FujiNet over BoIP.
