@@ -166,6 +166,10 @@ struct boip {
 
     int ever_connected;
     int first_connect_pending;
+
+    /* host's wire trace: dir 1 sent packets, dir 0 raw reads */
+    adamcore_boip_trace_fn trace;
+    void *trace_ud;
 };
 
 static uint8_t xor_ck(const uint8_t *p, int n)
@@ -196,7 +200,14 @@ void boip_destroy(struct boip *b)
     free(b);
 }
 
-int boip_connected(struct boip *b) { return b && b->fd >= 0; }
+int boip_connected(const struct boip *b) { return b && b->fd >= 0; }
+
+void boip_set_trace(struct boip *b, adamcore_boip_trace_fn fn, void *ud)
+{
+    if (!b) return;
+    b->trace = fn;
+    b->trace_ud = ud;
+}
 
 int boip_take_first_connect(struct boip *b)
 {
@@ -235,6 +246,7 @@ void boip_bus_reset(struct boip *b)
             drop_connection_at(b, "bus-reset-write");
             return;
         }
+        if (b->trace) b->trace(b->trace_ud, 1, &pkt, 1);
     }
 }
 
@@ -295,6 +307,8 @@ static void tx(struct boip *b, const uint8_t *pkt, int n)
     if (wire_trace()) dump_bytes("TX", pkt, n);
     if (net_write(b->fd, pkt, n) < 0)
         drop_connection_at(b, "tx-write");
+    else if (b->trace)
+        b->trace(b->trace_ud, 1, pkt, n);
 }
 
 static void tx1(struct boip *b, uint8_t type)
@@ -570,6 +584,7 @@ static void feed_rx(struct boip *b)
         if (r < 0) { drop_connection_at(b, "read-eof-or-error"); return; }
         if (r == 0) return;
         if (wire_trace()) dump_bytes("RX", b->rx + b->rxlen, r);
+        if (b->trace) b->trace(b->trace_ud, 0, b->rx + b->rxlen, r);
         b->rxlen += r;
         if (b->rxlen >= (int)sizeof(b->rx)) return;
     }
@@ -909,6 +924,8 @@ void boip_poll(struct boip *b)
             b->t_keepalive = now;
             if (net_write(b->fd, &pkt, 1) < 0)
                 drop_connection_at(b, "keepalive-write");
+            else if (b->trace)
+                b->trace(b->trace_ud, 1, &pkt, 1);
         }
         if (b->fd >= 0) {
             feed_rx(b);

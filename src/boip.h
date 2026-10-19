@@ -14,6 +14,8 @@
 
 #include <stdint.h>
 
+#include "adamcore.h"
+
 struct adamcore;
 struct boip;
 
@@ -21,7 +23,9 @@ struct boip *boip_create(int listen_port);
 void boip_destroy(struct boip *b);
 
 void boip_poll(struct boip *b);      /* accept/reconnect housekeeping */
-int  boip_connected(struct boip *b);
+int  boip_connected(const struct boip *b);
+/* The host's wire trace (adamcore_set_boip_trace); fn = NULL removes it. */
+void boip_set_trace(struct boip *b, adamcore_boip_trace_fn fn, void *ud);
 /* Returns 1 exactly once: when the first client connection of this
  * core's lifetime has just been accepted. Lets ADAM sessions reboot so
  * the EOS boot scan (which races the client's connect) sees FujiNet. */

@@ -137,6 +137,19 @@ void adamnet_shutdown(adamnet *an)
     }
 }
 
+/* ---- public BoIP link queries ---------------------------------------------- */
+
+void adamcore_set_boip_trace(adamcore *c, adamcore_boip_trace_fn fn, void *ud)
+{
+    if (c->an.link)
+        boip_set_trace(c->an.link, fn, ud);
+}
+
+int adamcore_boip_connected(const adamcore *c)
+{
+    return c->an.link ? boip_connected(c->an.link) : 0;
+}
+
 /* Cached: adamnet_scan runs per scanline, so a getenv() per DCB here is
  * ~15k calls a second. */
 static int an_trace(void)
