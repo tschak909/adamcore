@@ -212,3 +212,69 @@ void adamcore_set_exec_hook(adamcore *c,
     c->exec_hook = hook;
     c->exec_hook_ud = ud;
 }
+
+/* ---- bus hook -------------------------------------------------------------- */
+
+static uint8_t hook_mem_read(void *ud, uint16_t a)
+{
+    adamcore *c = ud;
+    uint8_t v = c->bus_mem_read(ud, a);
+    c->bus_hook(c->bus_hook_ud, ADAMCORE_BUS_MEM_R, a, v);
+    return v;
+}
+
+static void hook_mem_write(void *ud, uint16_t a, uint8_t v)
+{
+    adamcore *c = ud;
+    c->bus_hook(c->bus_hook_ud, ADAMCORE_BUS_MEM_W, a, v);
+    c->bus_mem_write(ud, a, v);
+}
+
+static uint8_t hook_io_read(void *ud, uint16_t p)
+{
+    adamcore *c = ud;
+    uint8_t v = c->bus_io_read(ud, p);
+    c->bus_hook(c->bus_hook_ud, ADAMCORE_BUS_IO_R, p, v);
+    return v;
+}
+
+static void hook_io_write(void *ud, uint16_t p, uint8_t v)
+{
+    adamcore *c = ud;
+    c->bus_hook(c->bus_hook_ud, ADAMCORE_BUS_IO_W, p, v);
+    c->bus_io_write(ud, p, v);
+}
+
+void adamcore_set_bus_hook(adamcore *c,
+                           void (*fn)(void *ud, int kind, uint16_t addr,
+                                      uint8_t val),
+                           void *ud)
+{
+    int installed = c->bus_hook != NULL;
+
+    c->bus_hook_ud = ud;
+    if (fn && !installed) {
+        c->bus_mem_read = c->cpu.mem_read;
+        c->bus_mem_write = c->cpu.mem_write;
+        c->bus_io_read = c->cpu.io_read;
+        c->bus_io_write = c->cpu.io_write;
+        c->cpu.mem_read = hook_mem_read;
+        c->cpu.mem_write = hook_mem_write;
+        c->cpu.io_read = hook_io_read;
+        c->cpu.io_write = hook_io_write;
+    } else if (!fn && installed) {
+        c->cpu.mem_read = c->bus_mem_read;
+        c->cpu.mem_write = c->bus_mem_write;
+        c->cpu.io_read = c->bus_io_read;
+        c->cpu.io_write = c->bus_io_write;
+    }
+    c->bus_hook = fn;
+}
+
+void adamcore_debug_beam(const adamcore *c, int *line, uint64_t *frame)
+{
+    if (line)
+        *line = c->dbg_in_frame ? c->dbg_line : 0;
+    if (frame)
+        *frame = c->frame_count;
+}
