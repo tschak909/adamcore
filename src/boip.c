@@ -125,7 +125,12 @@ enum {
      * a stock chain) but lapses if the node really does go away, restoring
      * the full budget. */
     STATUS_HEALTHY_MS = 1000,
-    STATUS_TIMEOUT_SEEN_MS = 25
+    STATUS_TIMEOUT_SEEN_MS = 25,
+    /* A keep-alive READY is a packet like any other to the node: it flushes
+     * its input FIFO afterwards, so a STATUS that follows it closely can be
+     * eaten whole. A STATUS this soon after one gets a single retry even
+     * from a healthy node. */
+    KEEPALIVE_SHADOW_MS = STATUS_TIMEOUT_SEEN_MS + 4
 };
 
 struct boip {
@@ -761,7 +766,9 @@ static void advance(struct boip *b)
         if (now - b->t_start > budget) {
             /* the real master retries a quiet node before giving up;
              * this also rides out FujiNet's startup registration */
-            if (!healthy && b->status_retries++ < STATUS_RETRIES) {
+            int shadowed = b->t_start - b->t_keepalive < KEEPALIVE_SHADOW_MS;
+            if (healthy ? (shadowed && b->status_retries++ < 1)
+                        : b->status_retries++ < STATUS_RETRIES) {
                 b->t_start = now;
                 b->rxlen = 0;
                 tx1(b, 1);
@@ -916,12 +923,16 @@ void boip_poll(struct boip *b)
         /* The real AdamNet bus is never silent (the master polls the
          * keyboard continuously); FujiNet's channel logic assumes that.
          * With the keyboard served locally we keep the link warm with a
-         * READY to an address no FujiNet device claims: it generates no
-         * response, so it can never be mistaken for a transaction ACK. */
+         * READY to address 3. FujiNet's clock device (APETime) may claim it
+         * and ACK; either way the reply is drained below and never taken
+         * for a transaction ACK. The node flushes its input after every
+         * packet, so the keep-alive counts as a finished transaction and the
+         * next command waits out the turnaround gap. */
         uint64_t now = net_now_ms();
         if (now - b->t_keepalive >= 300) {
             uint8_t pkt = 0xD3; /* READY -> unpopulated address 3 */
             b->t_keepalive = now;
+            b->t_last_done = now;
             if (net_write(b->fd, &pkt, 1) < 0)
                 drop_connection_at(b, "keepalive-write");
             else if (b->trace)
