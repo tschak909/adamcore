@@ -8,7 +8,9 @@
 
 #include <stdint.h>
 
-int net_listen(int port);              /* loopback listener, nonblocking */
+/* Listener, nonblocking, on an IPv4 literal (NULL/"" = loopback; "localhost"
+ * too). -1 on a bad address or a bind failure. */
+int net_listen(const char *addr, int port);
 int net_accept(int listen_fd);         /* -1 if none pending */
 int net_read(int fd, void *buf, int n);   /* >0 bytes, 0 none, -1 closed */
 /* Block until fd has readable bytes or the timeout expires. 1 readable,

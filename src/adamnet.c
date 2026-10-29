@@ -118,7 +118,8 @@ void adamnet_init(adamnet *an, struct adamcore *mc)
     an->mc = mc;
     an->pcb_addr = PCB_DEFAULT;
     if (mc->cfg.boip_listen_port > 0)
-        an->link = boip_create(mc->cfg.boip_listen_port);
+        an->link = boip_create(mc->cfg.boip_listen_addr,
+                              mc->cfg.boip_listen_port);
 }
 
 void adamnet_reset(adamnet *an)

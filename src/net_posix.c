@@ -23,7 +23,7 @@ static void set_nonblock(int fd)
     fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
-int net_listen(int port)
+int net_listen(const char *addr, int port)
 {
     struct sockaddr_in sa;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -32,7 +32,12 @@ int net_listen(int port)
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (!addr || !addr[0] || !strcmp(addr, "localhost"))
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    else if (inet_pton(AF_INET, addr, &sa.sin_addr) != 1) {
+        close(fd);
+        return -1;
+    }
     sa.sin_port = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0 ||
         listen(fd, 1) < 0) {

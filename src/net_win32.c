@@ -30,7 +30,7 @@ static void set_nonblock(SOCKET s)
     ioctlsocket(s, FIONBIO, &mode);
 }
 
-int net_listen(int port)
+int net_listen(const char *addr, int port)
 {
     struct sockaddr_in sa;
     SOCKET s;
@@ -43,7 +43,12 @@ int net_listen(int port)
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (!addr || !addr[0] || !strcmp(addr, "localhost"))
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    else if (InetPtonA(AF_INET, addr, &sa.sin_addr) != 1) {
+        closesocket(s);
+        return -1;
+    }
     sa.sin_port = htons((uint16_t)port);
     if (bind(s, (struct sockaddr *)&sa, sizeof(sa)) == SOCKET_ERROR ||
         listen(s, 1) == SOCKET_ERROR) {
