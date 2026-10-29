@@ -49,6 +49,11 @@ target_include_directories(boip_trace_test PRIVATE src)
 target_link_libraries(boip_trace_test adamcore pthread)
 add_test(NAME boip_trace COMMAND boip_trace_test)
 
+add_executable(boip_keepalive_gap_test tests/adamnet/boip_keepalive_gap_test.c)
+target_include_directories(boip_keepalive_gap_test PRIVATE src)
+target_link_libraries(boip_keepalive_gap_test adamcore pthread)
+add_test(NAME boip_keepalive_gap COMMAND boip_keepalive_gap_test)
+
 add_executable(cart_ops_test tests/machine/cart_ops_test.c)
 target_link_libraries(cart_ops_test adamcore)
 add_test(NAME cart_ops COMMAND cart_ops_test)
