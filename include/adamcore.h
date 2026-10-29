@@ -55,7 +55,10 @@ typedef struct {
 
     adamcore_machine start_machine;
 
-    int boip_listen_port; /* AdamNet-over-TCP listener on loopback; 0 = off */
+    int boip_listen_port; /* AdamNet-over-TCP listener; 0 = off */
+    /* IPv4 address the listener binds: NULL or "" = loopback only,
+     * "0.0.0.0" = every interface. Read only when boip_listen_port > 0. */
+    const char *boip_listen_addr;
     int palette;          /* 0..3 */
     int expansion;        /* controller expansion module 0..7 */
     int joystick_mode;    /* 0 none, 1 both ports, 2 port 2 only, 3 port 1 only */
