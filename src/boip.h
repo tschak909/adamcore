@@ -3,7 +3,7 @@
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * The emulator is the AdamNet master and LISTENS on loopback TCP; the
+ * The emulator is the AdamNet master and LISTENS on TCP (loopback unless the host picks an address); the
  * FujiNet runtime (fujinet-pc ADAM target, NetAdamNet) connects in as
  * the client. Wire protocol per the author's "All About AdamNet"
  * reference and the fujinet-pc sources. One transaction outstanding at
@@ -19,7 +19,7 @@
 struct adamcore;
 struct boip;
 
-struct boip *boip_create(int listen_port);
+struct boip *boip_create(const char *listen_addr, int listen_port);
 void boip_destroy(struct boip *b);
 
 void boip_poll(struct boip *b);      /* accept/reconnect housekeeping */
