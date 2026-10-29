@@ -62,6 +62,10 @@ add_executable(sgm_test tests/machine/sgm_test.c)
 target_link_libraries(sgm_test adamcore)
 add_test(NAME sgm COMMAND sgm_test)
 
+add_executable(bus_hook_test tests/machine/bus_hook_test.c)
+target_link_libraries(bus_hook_test adamcore)
+add_test(NAME bus_hook COMMAND bus_hook_test)
+
 add_executable(psg_test tests/psg/psg_test.c)
 target_link_libraries(psg_test adamcore)
 # Captured from the pre-refactor renderer (psg_test --capture). The split of

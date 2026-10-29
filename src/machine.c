@@ -467,6 +467,7 @@ int machine_frame_tail(adamcore *c)
 {
     uint8_t bd;
 
+    c->frame_count++;
     psg_publish(&c->snd, c->cpu.cycles);
 
     /* borders */
