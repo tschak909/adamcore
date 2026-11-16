@@ -184,12 +184,12 @@ static uint8_t xor_ck(const uint8_t *p, int n)
     return c;
 }
 
-struct boip *boip_create(int listen_port)
+struct boip *boip_create(const char *listen_addr, int listen_port)
 {
     struct boip *b = calloc(1, sizeof(*b));
     if (!b) return NULL;
     b->fd = -1;
-    b->listen_fd = net_listen(listen_port);
+    b->listen_fd = net_listen(listen_addr, listen_port);
     if (b->listen_fd < 0) {
         free(b);
         return NULL;
