@@ -117,6 +117,86 @@ void adamcore_set_bus_hook(adamcore *c,
  * out-pointer may be NULL. */
 void adamcore_debug_beam(const adamcore *c, int *line, uint64_t *frame);
 
+/* T-states into the scanline reported by adamcore_debug_beam (0 between
+ * frames; may run a few T-states past 227 when the last instruction of a line
+ * overshoots). Emulation-thread only. */
+int adamcore_debug_beam_tstate(const adamcore *c);
+
+/* ---- per-line VDP register capture ------------------------------------------
+ * Off by default (zero cost beyond one flag test per line). While enabled,
+ * every scanline 0..261 of every frame, on either run path, records the VDP
+ * registers and status as that line finished -- for active lines 0..191 the
+ * values the line was rendered with, so a register changed mid-frame shows up
+ * from the line after the write. The model is line-granular: a change in the
+ * middle of a line is not representable and lands on that line's record.
+ * Each record is stamped with the index of the frame it belongs to (the same
+ * counter as adamcore_debug_beam's frame: completed frames when the line
+ * ended), so a reader can tell lines of the last finished frame from lines of
+ * the frame in progress, and from older lines not yet overwritten.
+ * Disabling clears the records. Emulation-thread only. */
+void adamcore_vdp_line_capture_enable(adamcore *c, int enable);
+
+/* Returns 1 and fills the outputs (each may be NULL) if the line has a
+ * record, else 0. *frame is the frame the record belongs to. */
+int adamcore_vdp_line_regs(const adamcore *c, int line, uint8_t regs[8],
+                           uint8_t *status, uint64_t *frame);
+
+/* ---- SN76489 register mirror ---------------------------------------------------
+ * The emulation thread's own copy, updated on every write to the chip's port ($E0-$FF decode)
+ * with the chip's latch rule (a byte with bit 7 set latches the register and
+ * writes the low nibble; any other byte writes the latched register). The
+ * live chip belongs to the audio thread and is ~50 ms behind: not exposed.
+ * atten: 3 tones then noise, 0 loudest, 15 muted (2 dB per step).
+ * Tone frequency = 3579545 / (32 * period), a period of 0 counting as 1024.
+ * noise_ctrl bits 0-1 = shift rate, bit 2 = white noise. Values are the chip
+ * reset values until the guest writes. */
+typedef struct {
+    uint8_t latched_reg; /* 0..7: tone0 period, tone0 atten, tone1 ... noise atten */
+    uint16_t period[3];
+    uint8_t noise_ctrl;
+    uint8_t atten[4];
+} adamcore_sn_state;
+
+void adamcore_psg_sn_state(const adamcore *c, adamcore_sn_state *out);
+
+/* ---- device state getters (side-effect free) --------------------------------- */
+typedef struct {
+    uint8_t latch;     /* first control-port byte */
+    uint8_t latched;   /* 1 while waiting for the second byte */
+    uint8_t read_ahead;/* the data-port read-ahead buffer */
+    uint8_t int_line;  /* VDP INT pin (status F and R1 IE) */
+} adamcore_vdp_latch;
+
+void adamcore_vdp_latch_state(const adamcore *c, adamcore_vdp_latch *out);
+
+typedef struct {
+    uint8_t q;           /* Z80 Q register (F if the last instruction set flags) */
+    uint8_t ei_pending;  /* interrupt acceptance blocked for one instruction */
+    uint8_t irq_pending; /* maskable interrupt request line */
+    uint8_t nmi_pending; /* NMI latched, not yet taken */
+    uint64_t nmi_count;  /* VBlank NMIs raised since power-on */
+} adamcore_cpu_aux_state;
+
+void adamcore_cpu_aux(const adamcore *c, adamcore_cpu_aux_state *out);
+
+#define ADAMCORE_AY_REGS 16
+
+typedef struct {
+    uint8_t configured; /* ColecoVision with an SGM fitted; else all zero */
+    uint8_t ram_en;     /* port $53 bit 0: 24K RAM over $2000-$7FFF */
+    uint8_t bios_off;   /* port $7F bit 1 clear: RAM over the BIOS */
+    uint8_t ay_addr;    /* port $50: latched AY register */
+    uint8_t ay_regs[ADAMCORE_AY_REGS]; /* emulation-thread mirror */
+} adamcore_sgm_info;
+
+void adamcore_sgm_state(const adamcore *c, adamcore_sgm_info *out);
+
+/* Controller state: joy[port] is the packed word given to
+ * adamcore_set_joystick (written from other threads); joy_mode is the
+ * strobe: 0 = keypad half, 1 = joystick half. Either pointer may be NULL. */
+void adamcore_controller_state(const adamcore *c, uint16_t joy[2],
+                               uint8_t *joy_mode);
+
 #ifdef __cplusplus
 }
 #endif

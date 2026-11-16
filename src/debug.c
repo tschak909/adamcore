@@ -278,3 +278,83 @@ void adamcore_debug_beam(const adamcore *c, int *line, uint64_t *frame)
     if (frame)
         *frame = c->frame_count;
 }
+
+int adamcore_debug_beam_tstate(const adamcore *c)
+{
+    if (!c->dbg_in_frame)
+        return 0;
+    return (int)(c->cpu.cycles - c->frame_start_cycles -
+                 (uint64_t)c->dbg_line * ADAM_LINE_TSTATES);
+}
+
+/* ---- per-line VDP register capture ---------------------------------------- */
+
+void adamcore_vdp_line_capture_enable(adamcore *c, int enable)
+{
+    c->line_cap_en = enable != 0;
+    if (!enable)
+        memset(c->line_cap_stamp, 0, sizeof c->line_cap_stamp);
+}
+
+int adamcore_vdp_line_regs(const adamcore *c, int line, uint8_t regs[8],
+                           uint8_t *status, uint64_t *frame)
+{
+    if (line < 0 || line >= ADAM_FRAME_LINES || !c->line_cap_stamp[line])
+        return 0;
+    if (regs)
+        memcpy(regs, c->line_cap_regs[line], 8);
+    if (status) *status = c->line_cap_status[line];
+    if (frame) *frame = c->line_cap_stamp[line] - 1;
+    return 1;
+}
+
+/* ---- more device state ------------------------------------------------------ */
+
+void adamcore_psg_sn_state(const adamcore *c, adamcore_sn_state *out)
+{
+    const sn76489 *s = &c->sn_mirror;
+    int i;
+    out->latched_reg = s->latched_reg;
+    for (i = 0; i < 3; i++)
+        out->period[i] = s->period[i];
+    out->noise_ctrl = s->noise_ctrl;
+    for (i = 0; i < 4; i++)
+        out->atten[i] = s->atten[i];
+}
+
+void adamcore_vdp_latch_state(const adamcore *c, adamcore_vdp_latch *out)
+{
+    out->latch = c->vdp.latch;
+    out->latched = c->vdp.latched;
+    out->read_ahead = c->vdp.read_ahead;
+    out->int_line = c->vdp.int_line;
+}
+
+void adamcore_cpu_aux(const adamcore *c, adamcore_cpu_aux_state *out)
+{
+    out->q = c->cpu.q;
+    out->ei_pending = c->cpu.ei_pending;
+    out->irq_pending = c->cpu.irq_line;
+    out->nmi_pending = c->cpu.nmi_pending;
+    out->nmi_count = c->nmi_count;
+}
+
+void adamcore_sgm_state(const adamcore *c, adamcore_sgm_info *out)
+{
+    memset(out, 0, sizeof *out);
+    out->configured = c->cv && c->cfg.sgm;
+    out->ram_en = c->sgm_ram_en;
+    out->bios_off = c->sgm_bios_off;
+    out->ay_addr = c->ay_addr;
+    memcpy(out->ay_regs, c->ay_regs, sizeof out->ay_regs);
+}
+
+void adamcore_controller_state(const adamcore *c, uint16_t joy[2],
+                               uint8_t *joy_mode)
+{
+    if (joy) {
+        joy[0] = c->joy[0];
+        joy[1] = c->joy[1];
+    }
+    if (joy_mode) *joy_mode = c->joy_mode;
+}
