@@ -94,6 +94,29 @@ void adamcore_set_exec_hook(adamcore *c,
                             int (*hook)(void *ud, adamcore *c, uint16_t pc),
                             void *ud);
 
+/* ---- bus hook -------------------------------------------------------------- */
+typedef enum {
+    ADAMCORE_BUS_MEM_R = 0, /* Z80 memory read, after the value is decoded */
+    ADAMCORE_BUS_MEM_W,     /* Z80 memory write, before it lands */
+    ADAMCORE_BUS_IO_R,      /* Z80 IN: addr is the port, val what it read */
+    ADAMCORE_BUS_IO_W,      /* Z80 OUT: addr is the port */
+} adamcore_bus_kind;
+
+/* Called for every Z80 memory and I/O cycle (never for peek/poke, VDP or
+ * DMA-style device access). Runs on the emulation thread, in the middle of an
+ * instruction: a host that wants to stop sets a flag and stops from its exec
+ * hook at the next instruction. fn = NULL removes the hook; with none
+ * installed the bus costs nothing. */
+void adamcore_set_bus_hook(adamcore *c,
+                           void (*fn)(void *ud, int kind, uint16_t addr,
+                                      uint8_t val),
+                           void *ud);
+
+/* Where the beam is: scanline 0..261 of the frame in progress (0 between
+ * frames) and the number of frames completed since power-on. Either
+ * out-pointer may be NULL. */
+void adamcore_debug_beam(const adamcore *c, int *line, uint64_t *frame);
+
 #ifdef __cplusplus
 }
 #endif

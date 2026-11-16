@@ -79,6 +79,16 @@ struct adamcore {
     int bp_count;
     int (*exec_hook)(void *ud, struct adamcore *c, uint16_t pc);
     void *exec_hook_ud;
+    uint64_t frame_count;     /* completed frames, either run path */
+
+    /* adamcore_set_bus_hook: while a hook is installed cpu.mem_read & co.
+     * point at wrappers and the real handlers wait here. */
+    void (*bus_hook)(void *ud, int kind, uint16_t addr, uint8_t val);
+    void *bus_hook_ud;
+    uint8_t (*bus_mem_read)(void *ud, uint16_t a);
+    void (*bus_mem_write)(void *ud, uint16_t a, uint8_t v);
+    uint8_t (*bus_io_read)(void *ud, uint16_t p);
+    void (*bus_io_write)(void *ud, uint16_t p, uint8_t v);
 };
 
 /* Internal helpers shared between machine.c's frame loop and debug.c's
