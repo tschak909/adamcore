@@ -291,7 +291,10 @@ static void io_write(void *ud, uint16_t port, uint8_t v)
         }
         break;
     case 0xC0: c->joy_mode = 1; break; /* joystick strobe */
-    case 0xE0: psg_write_sn(&c->snd, c->cpu.cycles, v); break;
+    case 0xE0:
+        sn_write_reg(&c->sn_mirror, v); /* emulator-thread copy */
+        psg_write_sn(&c->snd, c->cpu.cycles, v);
+        break;
     default: break;
     }
 }
@@ -402,6 +405,7 @@ adamcore *adamcore_create(const adamcore_config *cfg)
               (uint32_t)(cfg->audio_rate > 0 ? cfg->audio_rate : 44100),
               /* the AY joins only on a ColecoVision with an SGM fitted */
               c->cv && cfg->sgm);
+    sn_reset(&c->sn_mirror);
     adamnet_init(&c->an, c);
 
     c->joy[0] = c->joy[1] = 0x7F7F;
@@ -453,6 +457,11 @@ void machine_vblank_nmi(adamcore *c)
 
 void machine_line_end(adamcore *c, int line)
 {
+    if (c->line_cap_en && line >= 0 && line < ADAM_FRAME_LINES) {
+        memcpy(c->line_cap_regs[line], c->vdp.regs, 8);
+        c->line_cap_status[line] = c->vdp.status;
+        c->line_cap_stamp[line] = c->frame_count + 1;
+    }
     if (line < TMS_ACTIVE_H) {
         uint16_t *row = &c->fb[(line + ADAM_BORDER_TOP) * ADAMCORE_FB_WIDTH];
         int x;

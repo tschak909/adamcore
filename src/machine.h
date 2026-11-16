@@ -9,6 +9,7 @@
 #include "adamcore.h"
 #include "adamnet.h"
 #include "psg.h"
+#include "sn76489.h"
 #include "tms9928a.h"
 #include "z80.h"
 
@@ -89,6 +90,19 @@ struct adamcore {
     void (*bus_mem_write)(void *ud, uint16_t a, uint8_t v);
     uint8_t (*bus_io_read)(void *ud, uint16_t p);
     void (*bus_io_write)(void *ud, uint16_t p, uint8_t v);
+
+    /* Emulation-thread mirror of the SN76489 registers, updated in io_write
+     * with the same sn_write_reg the audio thread applies later. The live
+     * chip (snd.sn) belongs to the audio thread and runs ~50 ms behind;
+     * adamcore_psg_sn_state reads only this copy. */
+    sn76489 sn_mirror;
+
+    /* adamcore_vdp_line_capture_enable: the VDP registers and status as each
+     * line finished, stamped with frame_count + 1 (0 = never captured). */
+    int line_cap_en;
+    uint8_t line_cap_regs[ADAM_FRAME_LINES][8];
+    uint8_t line_cap_status[ADAM_FRAME_LINES];
+    uint64_t line_cap_stamp[ADAM_FRAME_LINES];
 };
 
 /* Internal helpers shared between machine.c's frame loop and debug.c's
